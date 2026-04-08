@@ -36,8 +36,9 @@ before hooks/plugins have fired):
   state file (fallback for runtime session switches); SQLite database query
   at `~/.local/share/opencode/opencode.db` matching the pane's cwd (version-
   resilient fallback when the plugin hasn't fired)
-- **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl` (primary);
-  `resume <id>` in process args (fallback)
+- **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl` (primary when
+  available); SQLite thread lookup in `~/.codex/state_*.sqlite` by cwd
+  (fallback for current versions); `resume <id>` in process args (last resort)
 
 ## Adding a new assistant
 

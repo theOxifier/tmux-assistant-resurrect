@@ -45,7 +45,7 @@ pane_has_assistant() {
 
 	# Check the pane PID itself (handles exec-replaced shells, e.g. exec claude)
 	local pane_args
-	pane_args=$(echo "$snapshot" | awk -v pid="$shell_pid" '$1 == pid {print substr($0, index($0,$3)); exit}')
+	pane_args=$(awk -v pid="$shell_pid" '$1 == pid {print substr($0, index($0,$3)); exit}' <<<"$snapshot")
 	if [ -n "$(detect_tool "$pane_args")" ]; then
 		echo "$shell_pid"
 		return 0
@@ -60,15 +60,19 @@ pane_has_assistant() {
 	# its parent, it would be missed. A multi-pass approach would be more
 	# robust but slower; in practice, single-pass has been reliable.
 	local found_pid
-	found_pid=$(echo "$snapshot" | awk -v root="$shell_pid" '
-		BEGIN { pids[root]=1 }
-		{ if ($2 in pids) { pids[$1]=1; print $1, substr($0, index($0,$3)) } }
-	' | while read -r cpid cargs; do
-		if [ -n "$(detect_tool "$cargs")" ]; then
-			echo "$cpid"
-			break
-		fi
-	done)
+	found_pid=$(
+		while read -r cpid cargs; do
+			if [ -n "$(detect_tool "$cargs")" ]; then
+				echo "$cpid"
+				break
+			fi
+		done < <(
+			echo "$snapshot" | awk -v root="$shell_pid" '
+				BEGIN { pids[root]=1 }
+				{ if ($2 in pids) { pids[$1]=1; print $1, substr($0, index($0,$3)) } }
+			'
+		)
+	)
 
 	if [ -n "$found_pid" ]; then
 		echo "$found_pid"

@@ -50,7 +50,7 @@ Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
 |------|---------------|------------|------------|-------|
 | **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` in process args | - | Claude overwrites its process title, so args fallback only works if args are visible |
 | **OpenCode** | `-s` / `--session` in process args | Plugin state file | SQLite DB query (`~/.local/share/opencode/opencode.db`) | Go binary overwrites process title; DB fallback matches most recent session by cwd |
-| **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | `resume` in process args | - | Codex runs via Node.js, so args are always visible in `ps` |
+| **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | SQLite thread lookup in `~/.codex/state_*.sqlite` by cwd | `resume` in process args | Current Codex versions may not write `session-tags.jsonl`; SQLite fallback recovers stable thread UUIDs so renamed sessions still restore |
 
 Each tool has a primary and fallback extraction method. Fallbacks address the
 chicken-and-egg problem: after a restore, session IDs are in process args even
@@ -425,9 +425,12 @@ also cleans up its state file on process exit (SIGINT, SIGTERM).
 
 ### Codex CLI
 
-Codex natively writes PID-to-session mappings in
-`~/.codex/session-tags.jsonl`. The save script reads this file directly -- no
-additional hook is needed.
+Codex persists session state natively. Older versions write PID-to-session
+mappings in `~/.codex/session-tags.jsonl`; current versions persist threads in
+`~/.codex/state_*.sqlite`. The save script prefers the PID mapping when
+available, then falls back to the most recently updated non-archived thread for
+the pane's cwd, and only then falls back to parsing `codex resume ...` args.
+This keeps restores stable even after a Codex thread is renamed.
 
 ### Save hook (`scripts/save-assistant-sessions.sh`)
 

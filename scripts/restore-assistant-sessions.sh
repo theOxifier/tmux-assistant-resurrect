@@ -60,6 +60,12 @@ while read -r entry; do
 	cli_args=$(echo "$entry" | jq -r '.cli_args // empty')
 	env_json=$(echo "$entry" | jq -c '.env // {}')
 
+	# Defensive cleanup for stale Codex sidecars written from bare `codex resume`
+	# picker launches. Those old entries may have cli_args="resume".
+	if [ "$tool" = "codex" ]; then
+		cli_args=$(echo "$cli_args" | sed -E 's/^resume([ ]+[^ ]+)?//; s/^ //; s/ $//')
+	fi
+
 	# Check if the target pane's session exists
 	tmux_session="${pane%%:*}"
 	if ! tmux has-session -t "$tmux_session" 2>/dev/null; then

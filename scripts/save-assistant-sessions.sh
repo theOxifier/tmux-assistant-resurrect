@@ -137,6 +137,7 @@ get_codex_session() {
 	local child_pid="$1"
 	local args="$2"
 	local cwd="${3:-}"
+	local window_name="${4:-}"
 
 	# Method 1: session-tags.jsonl (written by Codex at runtime)
 	local tags_file="${HOME}/.codex/session-tags.jsonl"
@@ -151,16 +152,70 @@ get_codex_session() {
 		fi
 	fi
 
-	# Method 2: resume arg in process args (chicken-and-egg fallback)
-	# After restore, codex is launched as `codex resume <session_id>`.
+	# Method 2: explicit UUID in process args.
+	# If Codex was launched with `codex resume <uuid>`, trust that exact thread
+	# ID over cwd-based fallbacks.
 	local sid
-	sid=$(echo "$args" | sed -n "s/.*resume  *\([A-Za-z0-9_-]*\).*/\1/p")
-	if [ -n "$sid" ]; then
+	sid=$(echo "$args" | sed -n "s/.*resume  *\([A-Fa-f0-9][A-Fa-f0-9-]*\).*/\1/p")
+	if echo "$sid" | grep -Eq '^[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}$'; then
 		echo "$sid"
 		return
 	fi
 
-	# Method 3: Codex rollout session files (newer Codex versions).
+	# Method 3: named thread in process args or tmux window name.
+	# Current Codex versions persist renamed thread names in
+	# ~/.codex/session_index.jsonl. Use the explicit resume target when present,
+	# otherwise fall back to the tmux window name to disambiguate multiple Codex
+	# panes sharing the same cwd.
+	local named_target=""
+	named_target=$(echo "$args" | sed -n "s/.*resume  *\([A-Za-z0-9_./-][A-Za-z0-9_ ./-]*\).*/\1/p" | sed -E 's/^ +//; s/ +$//')
+	case "$named_target" in
+	-*) named_target="" ;;
+	esac
+	if [ -z "$named_target" ]; then
+		named_target="$window_name"
+	fi
+	if [ -n "$named_target" ]; then
+		local index_file="${HOME}/.codex/session_index.jsonl"
+		if [ -f "$index_file" ]; then
+			sid=$(jq -r --arg name "$named_target" 'select(.thread_name == $name) | .id' "$index_file" 2>/dev/null | tail -1 || true)
+			if [ -n "$sid" ]; then
+				if [ -n "$cwd" ] && command -v python3 >/dev/null 2>&1; then
+					local validated
+					validated=$(python3 -c "
+import glob, sqlite3, sys
+try:
+    sid, cwd = sys.argv[1], sys.argv[2]
+    for db_file in reversed(sorted(glob.glob(sys.argv[3]))):
+        try:
+            conn = sqlite3.connect('file:' + db_file + '?mode=ro', uri=True)
+            cur = conn.cursor()
+            cur.execute(
+                'SELECT id FROM threads WHERE id = ? AND cwd = ? AND archived = 0 LIMIT 1',
+                (sid, cwd,))
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                print(row[0])
+                break
+        except Exception:
+            pass
+except Exception:
+    pass
+" "$sid" "$cwd" "${HOME}/.codex/state_*.sqlite" 2>/dev/null || true)
+					if [ -n "$validated" ]; then
+						echo "$validated"
+						return
+					fi
+				else
+					echo "$sid"
+					return
+				fi
+			fi
+		fi
+	fi
+
+	# Method 4: Codex rollout session files (newer Codex versions).
 	# Newer releases persist session metadata under ~/.codex/sessions/*/*.jsonl
 	# and include a session_meta record with both id and cwd.
 	# We rank candidates by:
@@ -246,6 +301,52 @@ PY
 			return
 		fi
 	fi
+
+	# Method 5: SQLite state database (current Codex versions).
+	# Codex stores threads in ~/.codex/state_*.sqlite. Query the most recently
+	# updated non-archived thread matching the pane's cwd to recover the stable
+	# thread UUID when the process was launched via a named thread.
+	#
+	# Limitation: this is NOT PID-specific. If two Codex instances run in the
+	# same directory and no PID tag file is available, both panes get the most
+	# recently updated thread ID for that cwd.
+	if [ -n "$cwd" ] && command -v python3 >/dev/null 2>&1; then
+		sid=$(python3 -c "
+import glob, sqlite3, sys
+try:
+    cwd = sys.argv[1]
+    dbs = sorted(glob.glob(sys.argv[2]))
+    for db_file in reversed(dbs):
+        try:
+            conn = sqlite3.connect('file:' + db_file + '?mode=ro', uri=True)
+            cur = conn.cursor()
+            cur.execute(
+                'SELECT id FROM threads WHERE cwd = ? AND archived = 0 ORDER BY updated_at DESC LIMIT 1',
+                (cwd,))
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                print(row[0])
+                break
+        except Exception:
+            pass
+except Exception:
+    pass
+" "$cwd" "${HOME}/.codex/state_*.sqlite" 2>/dev/null || true)
+		if [ -n "$sid" ]; then
+			echo "$sid"
+			return
+		fi
+	fi
+
+	# Method 6: resume target in process args (last resort).
+	# This may be a stable UUID or a mutable thread name. Earlier methods should
+	# already have handled UUID, renamed-thread, rollout, and sqlite cases.
+	sid=$(echo "$args" | sed -n "s/.*resume  *\([A-Za-z0-9_-]*\).*/\1/p")
+	if [ -n "$sid" ]; then
+		echo "$sid"
+		return
+	fi
 }
 
 register_codex_session_id() {
@@ -306,8 +407,10 @@ extract_cli_args() {
 		args=$(echo "$args" | sed -E 's/--session[= ] *[^ ]*//; s/-s  *[^ ]*//')
 		;;
 	codex)
-		# resume <id> (positional)
-		args=$(echo "$args" | sed -E 's/resume  *[^ ]*//')
+		# Preserve only global flags before the `resume` subcommand. Anything from
+		# `resume` onward is a picker/session selector concern, not part of the
+		# stable base invocation we want to reconstruct during restore.
+		args=$(echo "$args" | sed -E 's/[ ]resume([ ].*)?$//; s/^resume([ ].*)?$//')
 		;;
 	esac
 
@@ -324,11 +427,12 @@ extract_cli_args() {
 resolve_pane_candidates() {
 	local pane_target="$1"
 	local pane_cwd="$2"
-	local pane_candidates="$3"
-	local us="$4"
-	local has_assoc_cache="$5"
-	local state_cache_file="$6"
-	local parts_file="$7"
+	local pane_window_name="$3"
+	local pane_candidates="$4"
+	local us="$5"
+	local has_assoc_cache="$6"
+	local state_cache_file="$7"
+	local parts_file="$8"
 
 	local resolved=0 first_tool="" first_pid=""
 	for pass in 1 2; do
@@ -369,7 +473,7 @@ resolve_pane_candidates() {
 				session_id="$cached_sid"
 				[ -z "$session_id" ] && session_id=$(get_opencode_session "$cand_pid" "$cand_args" "$pane_cwd" "$allow_opencode_db")
 				;;
-			codex) session_id=$(get_codex_session "$cand_pid" "$cand_args" "$pane_cwd") ;;
+			codex) session_id=$(get_codex_session "$cand_pid" "$cand_args" "$pane_cwd" "$pane_window_name") ;;
 			esac
 
 			if [ -n "$session_id" ]; then
@@ -431,13 +535,13 @@ main() {
 		rm -f "$PS_FILE" "$PANE_FILE" "$PARTS_FILE"
 		return 1
 	fi
-	tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}" >"$PANE_FILE"
+	tmux list-panes -a -F "#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}|#{window_name}" >"$PANE_FILE"
 
 	# --- Single awk pass: detect assistant tools across ALL pane process trees ---
 	# Replaces ~200 separate echo|awk pipe invocations with one pass.
 	# Reads pane list + ps snapshot, builds process tree in memory,
 	# BFS-walks descendants for each pane PID, detects tools.
-	# Output (tab-delimited): target\ttool\ttool_pid\ttool_args\tcwd
+	# Output (tab-delimited): target\ttool\ttool_pid\ttool_args\tcwd\twindow_name
 	# NOTE: emit all candidates per pane (pane PID + descendants) in BFS order.
 	# The shell pass below preserves legacy two-pass OpenCode behavior:
 	# 1) PID-specific only, then 2) DB fallback.
@@ -448,6 +552,7 @@ main() {
 			split($0, p, "|")
 			pane_target[p[2]] = p[1]
 			pane_cwd[p[2]] = p[3]
+			pane_window[p[2]] = p[4]
 			pane_list[++pane_count] = p[2]
 			next
 		}
@@ -476,10 +581,11 @@ main() {
 				root = pane_list[i]+0
 				target = pane_target[pane_list[i]]
 				cwd = pane_cwd[pane_list[i]]
+				window_name = pane_window[pane_list[i]]
 
 				# Check pane PID itself (handles exec-replaced shells)
 				if (root in proc_tool && proc_tool[root] != "") {
-					printf "%s\t%s\t%d\t%s\t%s\n", target, proc_tool[root], root, proc_args[root], cwd
+						printf "%s\t%s\t%d\t%s\t%s\t%s\n", target, proc_tool[root], root, proc_args[root], cwd, window_name
 				}
 
 				# BFS through descendant processes
@@ -496,7 +602,7 @@ main() {
 				while (qs <= qe) {
 					cur = queue[qs++]+0
 					if (cur in proc_tool && proc_tool[cur] != "") {
-						printf "%s\t%s\t%d\t%s\t%s\n", target, proc_tool[cur], cur, proc_args[cur], cwd
+							printf "%s\t%s\t%d\t%s\t%s\t%s\n", target, proc_tool[cur], cur, proc_args[cur], cwd, window_name
 					}
 					if (cur in child_list) {
 						nc = split(child_list[cur], kids, SUBSEP)
@@ -561,18 +667,19 @@ main() {
 
 	# Process only matched panes (those with a detected tool)
 	if [ -n "$MATCHES" ]; then
-		local current_target="" current_cwd="" pane_candidates=""
-		while IFS=$'\t' read -r target tool cpid cargs cwd; do
+		local current_target="" current_cwd="" current_window_name="" pane_candidates=""
+		while IFS=$'\t' read -r target tool cpid cargs cwd window_name; do
 			[ -z "$target" ] && continue
 
 			# If pane changed, process the previous pane's candidate list.
 			if [ -n "$current_target" ] && [ "$target" != "$current_target" ]; then
-				resolve_pane_candidates "$current_target" "$current_cwd" "$pane_candidates" "$US" "$HAS_ASSOC_CACHE" "$STATE_CACHE_FILE" "$PARTS_FILE"
+				resolve_pane_candidates "$current_target" "$current_cwd" "$current_window_name" "$pane_candidates" "$US" "$HAS_ASSOC_CACHE" "$STATE_CACHE_FILE" "$PARTS_FILE"
 				pane_candidates=""
 			fi
 
 			current_target="$target"
 			current_cwd="$cwd"
+			current_window_name="$window_name"
 			# Candidate tuples are US-delimited; a literal \x1f inside process args
 			# would break parsing, but this is practically unlikely for CLI argv.
 			pane_candidates="${pane_candidates}${tool}${US}${cpid}${US}${cargs}"$'\n'
@@ -580,7 +687,7 @@ main() {
 
 		# Process final pane candidate list.
 		if [ -n "$current_target" ] && [ -n "$pane_candidates" ]; then
-			resolve_pane_candidates "$current_target" "$current_cwd" "$pane_candidates" "$US" "$HAS_ASSOC_CACHE" "$STATE_CACHE_FILE" "$PARTS_FILE"
+			resolve_pane_candidates "$current_target" "$current_cwd" "$current_window_name" "$pane_candidates" "$US" "$HAS_ASSOC_CACHE" "$STATE_CACHE_FILE" "$PARTS_FILE"
 		fi
 	fi
 
@@ -662,14 +769,14 @@ strip_assistant_pane_contents() {
 # (batched processing replaced per-pane emit), but external scripts or tests
 # may source this file and call emit_session().
 emit_session() {
-	local target="$1" tool="$2" cpid="$3" cargs="$4" cwd="$5"
-	local allow_opencode_db="${6:-1}"
-	local log_missing="${7:-1}"
+	local target="$1" tool="$2" cpid="$3" cargs="$4" cwd="$5" window_name="${6:-}"
+	local allow_opencode_db="${7:-1}"
+	local log_missing="${8:-1}"
 	local session_id=""
 	case "$tool" in
 	claude) session_id=$(get_claude_session "$cpid" "$cargs") ;;
 	opencode) session_id=$(get_opencode_session "$cpid" "$cargs" "$cwd" "$allow_opencode_db") ;;
-	codex) session_id=$(get_codex_session "$cpid" "$cargs" "$cwd") ;;
+	codex) session_id=$(get_codex_session "$cpid" "$cargs" "$cwd" "$window_name") ;;
 	esac
 
 	if [ -n "$session_id" ]; then

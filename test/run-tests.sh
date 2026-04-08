@@ -1032,6 +1032,93 @@ fi
 HOME="$ORIG_HOME"
 rm -rf "$ROLLOUT_TEST_DIR"
 
+# --- Codex: SQLite database fallback ---
+# Current Codex versions store thread metadata in ~/.codex/state_*.sqlite.
+# This should recover the stable thread UUID even if the launch args contain
+# a stale or renamed thread name.
+CODEX_HOME_DIR=$(mktemp -d)
+CODEX_DB_FILE="$CODEX_HOME_DIR/state_5.sqlite"
+python3 -c "
+import sqlite3
+conn = sqlite3.connect('$CODEX_DB_FILE')
+conn.execute('''CREATE TABLE threads (
+    id TEXT PRIMARY KEY,
+    rollout_path TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    model_provider TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    title TEXT NOT NULL,
+    sandbox_policy TEXT NOT NULL,
+    approval_mode TEXT NOT NULL,
+    tokens_used INTEGER NOT NULL DEFAULT 0,
+    has_user_event INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    archived_at INTEGER
+)''')
+conn.execute('''INSERT INTO threads (
+    id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+    sandbox_policy, approval_mode, archived
+) VALUES (
+    '019renamewinner00000000000000000000',
+    '/tmp/rollout-a.jsonl',
+    1000, 3000, 'interactive', 'openai',
+    '/tmp/codex-project', 'renamed session',
+    'workspace-write', 'on-request', 0
+)''')
+conn.execute('''INSERT INTO threads (
+    id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+    sandbox_policy, approval_mode, archived
+) VALUES (
+    '019olderthread000000000000000000000',
+    '/tmp/rollout-b.jsonl',
+    1000, 2000, 'interactive', 'openai',
+    '/tmp/codex-project', 'older session',
+    'workspace-write', 'on-request', 0
+)''')
+conn.execute('''INSERT INTO threads (
+    id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+    sandbox_policy, approval_mode, archived
+) VALUES (
+    '019archived000000000000000000000000',
+    '/tmp/rollout-c.jsonl',
+    1000, 4000, 'interactive', 'openai',
+    '/tmp/codex-project', 'archived session',
+    'workspace-write', 'on-request', 1
+)''')
+conn.execute('''INSERT INTO threads (
+    id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+    sandbox_policy, approval_mode, archived
+) VALUES (
+    '019otherdir000000000000000000000000',
+    '/tmp/rollout-d.jsonl',
+    1000, 5000, 'interactive', 'openai',
+    '/tmp/other-project', 'other dir session',
+    'workspace-write', 'on-request', 0
+)''')
+conn.commit()
+conn.close()
+"
+REAL_HOME="$HOME"
+export HOME="$CODEX_HOME_DIR"
+mkdir -p "$HOME/.codex"
+mv "$CODEX_DB_FILE" "$HOME/.codex/state_5.sqlite"
+cat >"$HOME/.codex/session_index.jsonl" <<'CODEXINDEXEOF'
+{"id":"019renamewinner00000000000000000000","thread_name":"renamed session","updated_at":"2026-01-01T00:00:03Z"}
+{"id":"019otherdir000000000000000000000000","thread_name":"other dir session","updated_at":"2026-01-01T00:00:05Z"}
+CODEXINDEXEOF
+assert_eq "Codex DB fallback finds newest session by cwd" "019renamewinner00000000000000000000" "$(get_codex_session 99999 "codex" "/tmp/codex-project")"
+assert_eq "Codex explicit UUID arg beats DB fallback" "01911111-2222-7333-8444-555555555555" "$(get_codex_session 99999 "codex --full-auto resume 01911111-2222-7333-8444-555555555555" "/tmp/codex-project")"
+assert_eq "Codex window-name fallback resolves renamed session" "019renamewinner00000000000000000000" "$(get_codex_session 99999 "codex" "/tmp/codex-project" "renamed session")"
+assert_eq "Codex resume --all falls back to window name" "019renamewinner00000000000000000000" "$(get_codex_session 99999 "codex resume --all" "/tmp/codex-project" "renamed session")"
+assert_eq "Codex DB fallback beats stale renamed-session args" "019renamewinner00000000000000000000" "$(get_codex_session 99999 "codex resume old-session-name" "/tmp/codex-project")"
+assert_eq "Codex invalid window-name falls back to cwd match" "019renamewinner00000000000000000000" "$(get_codex_session 99999 "codex" "/tmp/codex-project" "other dir session")"
+assert_eq "Codex DB fallback ignores archived sessions" "019renamewinner00000000000000000000" "$(get_codex_session 99999 "codex" "/tmp/codex-project")"
+assert_eq "Codex DB fallback returns empty for unknown cwd" "" "$(get_codex_session 99999 "codex" "/tmp/unknown-project")"
+export HOME="$REAL_HOME"
+rm -rf "$CODEX_HOME_DIR"
+
 # --- OpenCode: -s and --session arg extraction ---
 assert_eq "OpenCode -s extraction" "ses_oc_456" "$(get_opencode_session 99999 "opencode -s ses_oc_456" "/tmp")"
 assert_eq "OpenCode --session extraction" "ses_oc_789" "$(get_opencode_session 99999 "opencode --session ses_oc_789" "/tmp")"
@@ -1897,6 +1984,18 @@ assert_eq "Codex strip resume" "--full-auto" \
 assert_eq "Codex bare resume" "" \
 	"$(extract_cli_args "codex" "codex resume ses_abc")"
 
+# Codex: bare picker subcommand (no session ID)
+assert_eq "Codex bare resume picker" "" \
+	"$(extract_cli_args "codex" "codex resume")"
+
+# Codex: preserve global flags around resume
+assert_eq "Codex preserves global flags" "--full-auto --search --model gpt-5" \
+	"$(extract_cli_args "codex" "codex --full-auto --search --model gpt-5 resume 01911111-2222-7333-8444-555555555555")"
+
+# Codex: drop resume-subcommand flags while preserving global flags
+assert_eq "Codex drops resume-only flags" "--full-auto" \
+	"$(extract_cli_args "codex" "codex --full-auto resume --all old-session-name")"
+
 # Edge: binary with path prefix
 assert_eq "Binary path prefix stripped" "--dangerously-skip-permissions" \
 	"$(extract_cli_args "claude" "/opt/homebrew/bin/claude --dangerously-skip-permissions")"
@@ -2295,6 +2394,47 @@ assert_contains "Bracket model: model name quoted" "$bracket_log" "'claude-opus-
 assert_contains "Bracket model: uses command claude" "$bracket_log" "command claude"
 
 kill_pane_children test-restore-bracket true
+
+# --- Test 10g: Restore strips stale codex bare-resume cli_args ---
+
+echo ""
+echo "=== Test 10g: restore strips stale codex bare-resume cli_args ==="
+echo ""
+
+tmux new-session -d -s test-restore-codex-stale -c /tmp 2>/dev/null || true
+sleep 0.5
+
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RCODEXSTALE'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {
+      "pane": "test-restore-codex-stale:0.0",
+      "tool": "codex",
+      "session_id": "019stalecliargs00000000000000000000",
+      "cwd": "/tmp",
+      "pid": "99999",
+      "cli_args": "resume",
+      "env": null
+    }
+  ]
+}
+RCODEXSTALE
+
+>"$RESTORE_LOG"
+just restore 2>&1
+sleep 5
+
+codex_stale_log=$(cat "$RESTORE_LOG")
+assert_contains "Codex stale cli_args: restore still runs" "$codex_stale_log" "019stalecliargs00000000000000000000"
+assert_contains "Codex stale cli_args: single resume subcommand" "$codex_stale_log" "cmd: command codex resume '019stalecliargs00000000000000000000'"
+if echo "$codex_stale_log" | grep -q "resume resume"; then
+	fail "Codex stale cli_args: duplicate resume should not appear"
+else
+	pass "Codex stale cli_args: duplicate resume removed"
+fi
+
+kill_pane_children test-restore-codex-stale true
 
 # --- Summary ---
 
