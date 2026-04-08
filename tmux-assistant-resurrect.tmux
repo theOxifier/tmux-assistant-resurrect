@@ -29,5 +29,5 @@ tmux set-option -g @resurrect-hook-post-restore-all "python3 '${CURRENT_DIR}/scr
 tmux set-option -g @continuum-save-interval '5'
 tmux set-option -g @continuum-restore 'on'
 
-# Install assistant-native hooks/plugins through the Python runtime.
-python3 "${CURRENT_DIR}/scripts/assistant_resurrect.py" install-hooks >/dev/null 2>&1 || true
+# Install assistant-native hooks/plugins through the admin runtime.
+python3 "${CURRENT_DIR}/scripts/assistant_admin.py" install-hooks >/dev/null 2>&1 || true

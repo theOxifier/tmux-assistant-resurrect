@@ -10,7 +10,8 @@ session IDs and restore them automatically.
 
 - `tmux-assistant-resurrect.tmux` -- TPM plugin entry point (sets tmux options, installs hooks)
 - `hooks/` -- Native hooks/plugins for each assistant tool (write session IDs to state files)
-- `scripts/assistant_resurrect.py` -- Python runtime for save/restore/clean/status and hook installation
+- `scripts/assistant_resurrect.py` -- Core Python runtime for save/restore and Claude hook handling
+- `scripts/assistant_admin.py` -- Admin/runtime setup for install/uninstall/status/clean
 - `config/` -- tmux configuration snippet (used by `just install`, not TPM)
 - `docs/design-principles.md` -- Detection approach, session ID extraction, process title behavior
 - `justfile` -- Developer recipes (install, uninstall, status, test); end users use TPM
@@ -65,8 +66,8 @@ process args as a reliable fallback.
 - State files contain the full tool-provided context (merged from hook stdin /
   plugin events) plus plugin metadata (`tool`, `ppid`/`pid`, `timestamp`, `env`).
   The Claude hook merges Claude's entire SessionStart JSON; the OpenCode plugin
-  captures the full Session object. The save script reads `session_id`, `model`,
-  and `env` from state files and `cli_args` from `ps` process args. The restore
+  captures the full Session object. The save script reads `session_id` and `env`
+  from state files and `cli_args` from `ps` process args. The restore
   script uses `cli_args` to reconstruct the original CLI invocation and restores
   user-configured env vars (from `@assistant-resurrect-capture-env`) as a command
   prefix.
@@ -82,10 +83,9 @@ process args as a reliable fallback.
   POSIX-ish shells)
 - Hook command paths use single quotes (`bash '${CURRENT_DIR}/hooks/...'`);
   this breaks if the install path contains a single quote (unlikely with TPM)
-- The sidecar JSON (`assistant-sessions.json`) entries include enriched fields:
-  `model` (from state file or `--model` in args), `cli_args` (from `ps` args
-  with binary name and session/resume args stripped), `env` (from state file).
-  All are optional for backward compatibility.
+- The sidecar JSON (`assistant-sessions.json`) entries keep only replayable
+  fields: `pane`, `tool`, `session_id`, optional `cwd`, optional `cli_args`,
+  and optional `env`.
 - `extract_cli_args()` in `scripts/assistant_resurrect.py` strips per-tool session
   args: Claude `--resume[= ]<id>`, OpenCode `--session[= ]<id>` and `-s <id>`,
   Codex `resume <id>`. Returns normalized whitespace-trimmed string.

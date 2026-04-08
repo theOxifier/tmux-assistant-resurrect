@@ -138,7 +138,8 @@ hooks/
   claude-session-cleanup.sh       # Claude SessionEnd hook (removes state file)
   opencode-session-track.js       # OpenCode plugin (tracks session ID + cleanup)
 scripts/
-  assistant_resurrect.py          # Python runtime (save, restore, clean, status, hook install)
+  assistant_resurrect.py          # Core runtime (save, restore, Claude hook handlers)
+  assistant_admin.py              # Admin/runtime setup (install, uninstall, status, clean)
 test/
   Dockerfile                      # Docker image with tmux, just, python3, jq, and real assistant CLIs
   test_runtime.py                 # Python unit tests for runtime internals
@@ -247,8 +248,6 @@ Example output:
       "tool": "claude",
       "session_id": "01abc...",
       "cwd": "/home/user/src/my-project",
-      "pid": "12345",
-      "model": "claude-opus-4-6",
       "cli_args": "--dangerously-skip-permissions --model claude-opus-4-6",
       "env": {"tmux_pane": "%1", "shell": "/bin/zsh", "ANTHROPIC_BASE_URL": "https://proxy.internal"}
     },
@@ -257,8 +256,6 @@ Example output:
       "tool": "opencode",
       "session_id": "ses_xyz...",
       "cwd": "/home/user/src/other-project",
-      "pid": "12346",
-      "model": "",
       "cli_args": "",
       "env": {"tmux_pane": "%2", "shell": "/bin/zsh"}
     }
@@ -449,7 +446,6 @@ writes `~/.tmux/resurrect/assistant-sessions.json`. It also captures:
 
 - **CLI flags** (`cli_args`): extracted from `ps` args with the binary name and
   session/resume args stripped (e.g., `--dangerously-skip-permissions --model opus`)
-- **Model** (`model`): from state file (preferred) or `--model` in args (fallback)
 - **Environment** (`env`): from state file (captured by hooks/plugins)
 
 Writes everything to `~/.tmux/resurrect/assistant-sessions.json`.

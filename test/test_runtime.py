@@ -290,7 +290,7 @@ class StripPaneContentsTests(TempEnvMixin, unittest.TestCase):
         with tarfile.open(archive_path, "w:gz") as archive:
             archive.add(pane_dir, arcname="./pane_contents")
         sessions = [
-            {"pane": "assistant-session:0.0", "tool": "claude", "session_id": "ses_1", "cwd": "/tmp", "pid": "111"}
+            {"pane": "assistant-session:0.0", "tool": "claude", "session_id": "ses_1", "cwd": "/tmp"}
         ]
         runtime.strip_assistant_pane_contents_runtime(
             sessions=sessions,

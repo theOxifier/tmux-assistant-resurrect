@@ -44,15 +44,15 @@ install-plugins:
 
 # Install assistant hooks (Claude hook + OpenCode plugin)
 install-hooks:
-    @python3 "{{repo_dir}}/scripts/assistant_resurrect.py" install-hooks
+    @python3 "{{repo_dir}}/scripts/assistant_admin.py" install-hooks
 
 # Install Claude Code hooks (SessionStart + SessionEnd) into ~/.claude/settings.json
 install-claude-hook:
-    @python3 "{{repo_dir}}/scripts/assistant_resurrect.py" install-claude-hook
+    @python3 "{{repo_dir}}/scripts/assistant_admin.py" install-claude-hook
 
 # Install OpenCode session-tracker plugin
 install-opencode-plugin:
-    @python3 "{{repo_dir}}/scripts/assistant_resurrect.py" install-opencode-plugin
+    @python3 "{{repo_dir}}/scripts/assistant_admin.py" install-opencode-plugin
 
 # Add resurrect config to ~/.tmux.conf
 configure-tmux:
@@ -137,11 +137,11 @@ uninstall: uninstall-claude-hook uninstall-opencode-plugin unconfigure-tmux
 
 # Remove Claude Code hooks (SessionStart + SessionEnd)
 uninstall-claude-hook:
-    @python3 "{{repo_dir}}/scripts/assistant_resurrect.py" uninstall-claude-hook
+    @python3 "{{repo_dir}}/scripts/assistant_admin.py" uninstall-claude-hook
 
 # Remove OpenCode session-tracker plugin
 uninstall-opencode-plugin:
-    @python3 "{{repo_dir}}/scripts/assistant_resurrect.py" uninstall-opencode-plugin
+    @python3 "{{repo_dir}}/scripts/assistant_admin.py" uninstall-opencode-plugin
 
 # Remove resurrect config from ~/.tmux.conf
 unconfigure-tmux:
@@ -175,7 +175,7 @@ unconfigure-tmux:
 
 # Show current status: installed hooks, tracked sessions, state files
 status:
-    @python3 "{{repo_dir}}/scripts/assistant_resurrect.py" status
+    @python3 "{{repo_dir}}/scripts/assistant_admin.py" status
 
 # Manually trigger a save of current assistant sessions
 save:
@@ -187,7 +187,7 @@ restore:
 
 # Clean up stale state files (from dead processes)
 clean:
-    @python3 "{{repo_dir}}/scripts/assistant_resurrect.py" clean
+    @python3 "{{repo_dir}}/scripts/assistant_admin.py" clean
 
 # Run integration tests in Docker
 test:

@@ -1346,7 +1346,7 @@ printf '{ invalid\n' >"$HOME/.claude/settings.json"
 invalid_before=$(cat "$HOME/.claude/settings.json")
 
 invalid_install_exit=0
-python3 "$REPO_DIR/scripts/assistant_resurrect.py" install-claude-hook >/dev/null 2>/tmp/invalid-claude-install.err || invalid_install_exit=$?
+python3 "$REPO_DIR/scripts/assistant_admin.py" install-claude-hook >/dev/null 2>/tmp/invalid-claude-install.err || invalid_install_exit=$?
 assert_eq "Direct install fails on invalid Claude settings" "1" "$invalid_install_exit"
 assert_eq "Direct install leaves invalid Claude settings untouched" "$invalid_before" "$(cat "$HOME/.claude/settings.json")"
 
@@ -1449,10 +1449,10 @@ else
 	fail "User settings lost during unconfigure"
 fi
 
-# --- Test 9b: enriched fields in assistant-sessions.json ---
+# --- Test 9b: saved session includes replayable fields ---
 
 echo ""
-echo "=== Test 9b: enriched fields in assistant-sessions.json ==="
+echo "=== Test 9b: saved session includes replayable fields ==="
 echo ""
 
 # Re-install so save/restore use the updated scripts
@@ -1465,12 +1465,11 @@ enrich_shell_pid=$(tmux display-message -t test-enrich-claude -p '#{pane_pid}')
 wait_for_child "$enrich_shell_pid" "claude" 10 >/dev/null || echo "WARN: claude child not found for enrich test"
 enrich_child_pid=$(ps -eo pid=,ppid=,args= | awk -v ppid="$enrich_shell_pid" '$2 == ppid && /claude/ {print $1; exit}')
 
-# Create an enriched state file (model, env) keyed by child PID
+# Create a state file with env metadata keyed by child PID
 mkdir -p "$TEST_STATE_DIR"
 cat >"$TEST_STATE_DIR/claude-${enrich_child_pid}.json" <<EEOF
 {
   "session_id": "ses_enrich_test",
-  "model": "claude-opus-4-6",
   "source": "startup",
   "tool": "claude",
   "ppid": $enrich_child_pid,
@@ -1494,10 +1493,6 @@ enrich_entry=$(jq '.sessions[] | select(.pane | contains("test-enrich-claude"))'
 enrich_cli_args=$(echo "$enrich_entry" | jq -r '.cli_args // empty')
 assert_contains "Enriched: cli_args has --dangerously-skip-permissions" "$enrich_cli_args" "--dangerously-skip-permissions"
 
-# Verify model from state file
-enrich_model=$(echo "$enrich_entry" | jq -r '.model // empty')
-assert_eq "Enriched: model from state file" "claude-opus-4-6" "$enrich_model"
-
 # Verify env from state file
 enrich_env=$(echo "$enrich_entry" | jq -r '.env.ANTHROPIC_BASE_URL // empty')
 assert_eq "Enriched: env from state file" "https://proxy.internal" "$enrich_env"
@@ -1509,10 +1504,10 @@ assert_eq "Enriched: env has tmux_pane" "%5" "$enrich_env_pane"
 rm -f "$TEST_STATE_DIR/claude-${enrich_child_pid}.json"
 kill_pane_children test-enrich-claude true
 
-# --- Test 9c: Backward compat — missing enriched fields ---
+# --- Test 9c: save tolerates minimal state files ---
 
 echo ""
-echo "=== Test 9c: backward compat — save with minimal state file ==="
+echo "=== Test 9c: save tolerates minimal state files ==="
 echo ""
 
 # Create a session with a MINIMAL state file (no model, no env — old format)
@@ -1541,49 +1536,16 @@ minimal_entry=$(jq '.sessions[] | select(.pane | contains("test-enrich-minimal")
 minimal_sid=$(echo "$minimal_entry" | jq -r '.session_id')
 assert_eq "Backward compat: session_id present" "ses_minimal_enrich" "$minimal_sid"
 
-# Should not crash with missing model/env — model should be empty string
-minimal_model=$(echo "$minimal_entry" | jq -r '.model')
-if [ -n "$minimal_model" ] || [ "$minimal_model" = "" ]; then
-	pass "Backward compat: no crash when model absent from state file"
+# Should not crash with missing env
+minimal_env=$(echo "$minimal_entry" | jq -r '.env // empty')
+if [ -z "$minimal_env" ]; then
+	pass "Minimal state file: missing env tolerated"
 else
-	fail "Backward compat: unexpected model value '$minimal_model'"
+	fail "Minimal state file: unexpected env value '$minimal_env'"
 fi
 
 rm -f "$TEST_STATE_DIR/claude-${minimal_enrich_child}.json"
 kill_pane_children test-enrich-minimal true
-
-# --- Test 9d: model fallback from --model in CLI args ---
-
-echo ""
-echo "=== Test 9d: model fallback from CLI args ==="
-echo ""
-
-tmux new-session -d -s test-model-fallback -c /tmp
-tmux send-keys -t test-model-fallback "claude --model sonnet --resume ses_model_fb" Enter
-model_fb_shell=$(tmux display-message -t test-model-fallback -p '#{pane_pid}')
-wait_for_child "$model_fb_shell" "claude" 10 >/dev/null || echo "WARN"
-model_fb_child=$(ps -eo pid=,ppid=,args= | awk -v ppid="$model_fb_shell" '$2 == ppid && /claude/ {print $1; exit}')
-
-# State file WITHOUT model field (simulating old hook or missing field)
-cat >"$TEST_STATE_DIR/claude-${model_fb_child}.json" <<FBEOF
-{
-  "session_id": "ses_model_fb",
-  "tool": "claude",
-  "ppid": $model_fb_child,
-  "timestamp": "2026-01-01T00:00:00Z"
-}
-FBEOF
-
-rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
-just save 2>&1
-
-SAVED="$HOME/.tmux/resurrect/assistant-sessions.json"
-fb_entry=$(jq '.sessions[] | select(.pane | contains("test-model-fallback"))' "$SAVED")
-fb_model=$(echo "$fb_entry" | jq -r '.model // empty')
-assert_eq "Model fallback: extracted from --model in CLI args" "sonnet" "$fb_model"
-
-rm -f "$TEST_STATE_DIR/claude-${model_fb_child}.json"
-kill_pane_children test-model-fallback true
 
 # --- Test 10: restore uses enriched fields ---
 
