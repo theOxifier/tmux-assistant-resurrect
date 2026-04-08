@@ -79,8 +79,8 @@ set -g status-style "bg=colour235,fg=colour248"\n\
 set -g @plugin '\''tmux-plugins/tpm'\''\n\
 set -g @plugin '\''tmux-plugins/tmux-resurrect'\''\n\
 set -g @plugin '\''tmux-plugins/tmux-continuum'\''\n\
-set -g @resurrect-hook-post-save-all "bash ~/tmux-assistant-resurrect/scripts/save-assistant-sessions.sh"\n\
-set -g @resurrect-hook-post-restore-all "bash ~/tmux-assistant-resurrect/scripts/restore-assistant-sessions.sh"\n\
+set -g @resurrect-hook-post-save-all "python3 ~/tmux-assistant-resurrect/scripts/assistant_resurrect.py save"\n\
+set -g @resurrect-hook-post-restore-all "python3 ~/tmux-assistant-resurrect/scripts/assistant_resurrect.py restore"\n\
 set -g @continuum-save-interval '\''5'\''\n\
 set -g @continuum-restore '\''off'\''\n\
 run '\''~/.tmux/plugins/tpm/tpm'\''\n\

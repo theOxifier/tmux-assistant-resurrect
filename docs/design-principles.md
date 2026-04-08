@@ -3,24 +3,27 @@
 ## Direct process detection
 
 Agent detection uses direct process inspection rather than LLM-based
-classification or screen content analysis. The save script:
+classification or screen content analysis. The Python save runtime:
 
 1. Takes a single `ps -eo pid=,ppid=,args=` snapshot (efficient, no per-pane calls)
 2. For each tmux pane, finds direct child processes of the pane's shell
-3. Matches binary names via `case` patterns (`*/claude`, `*/opencode`, `*/codex`)
+3. Matches binary names in `detect_tool()` (`claude`, `opencode`, `codex`)
 4. Excludes known false positives (e.g., `opencode run ...` LSP subprocesses)
 
 This is simple, fast, and deterministic. No API calls, no LLM costs, no
 latency per pane.
 
-## What scripts do
+## What the runtime does
 
 - Capture pane metadata from tmux (PIDs, working directories)
 - Detect assistants by matching child process binary names
 - Read session ID state files written by tool-native hooks/plugins
 - Parse process arguments for session identifiers
+- Query assistant-native metadata stores (JSONL, SQLite)
 - Format and write JSON output
 - Send commands to tmux panes via `tmux send-keys`
+- Poll panes for readiness during restore instead of using fixed sleeps
+- Confirm assistant launch after `send-keys` and retry panes that did not actually start
 
 ## Session ID extraction
 
@@ -37,16 +40,16 @@ before hooks/plugins have fired):
   at `~/.local/share/opencode/opencode.db` matching the pane's cwd (version-
   resilient fallback when the plugin hasn't fired)
 - **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl` (primary when
-  available); SQLite thread lookup in `~/.codex/state_*.sqlite` by cwd
-  (fallback for current versions); `resume <id>` in process args (last resort)
+  available); explicit UUID / named-thread / rollout / SQLite evidence
+  (ordered fallback chain); `resume <id>` in process args (last resort)
 
 ## Adding a new assistant
 
 To add support for a new tool:
 
-1. Add a binary name pattern in `detect_tool()` (`case` statement)
-2. Add a `get_<tool>_session()` function for session ID extraction
-3. Add a restore command in `restore-assistant-sessions.sh`
+1. Extend `detect_tool()` in `scripts/assistant_resurrect.py`
+2. Add a `get_<tool>_session()` resolver for session ID extraction
+3. Extend `build_resume_command()` for the tool's restore invocation
 4. Optionally add a hook/plugin if the tool doesn't expose session IDs externally
 
 ## Process title behavior
@@ -67,4 +70,4 @@ To add support for a new tool:
 - `pgrep -P` is unreliable on macOS (silently misses children). Always use
   `ps -eo pid=,ppid=` with awk filtering instead.
 - tmux 3.4 converts tab characters to underscores in `-F` format output. The
-  save script uses pipe `|` as the delimiter instead.
+  save runtime uses pipe `|` as the delimiter instead.

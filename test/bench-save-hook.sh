@@ -19,6 +19,14 @@ REPO_PATH="${1:?repo path required}"
 RUNS="${2:-7}"
 PANES="${3:-124}"
 ASSISTANTS="${4:-60}"
+TMUX_SOCKET="assistant-resurrect-bench-$$"
+export TMUX_ASSISTANT_TMUX_SOCKET="$TMUX_SOCKET"
+export TMUX_ASSISTANT_TMUX_CONFIG="/dev/null"
+TMUX_REAL_BIN="$(command -v tmux)"
+
+tmux() {
+	env -u TMUX "$TMUX_REAL_BIN" -L "$TMUX_SOCKET" -f /dev/null "$@"
+}
 
 if [ "$ASSISTANTS" -gt "$PANES" ]; then
 	echo "assistants ($ASSISTANTS) cannot exceed panes ($PANES)" >&2
@@ -55,7 +63,7 @@ done
 sleep 1
 
 # Warmup run.
-bash "$REPO_PATH/scripts/save-assistant-sessions.sh" >/dev/null 2>&1 || true
+python3 "$REPO_PATH/scripts/assistant_resurrect.py" save >/dev/null 2>&1 || true
 
 echo "repo=$REPO_PATH"
 echo "runs=$RUNS panes=$PANES assistants=$ASSISTANTS"
@@ -63,7 +71,7 @@ echo "runs=$RUNS panes=$PANES assistants=$ASSISTANTS"
 TIMES_FILE="$BENCH_ROOT/times.txt"
 : >"$TIMES_FILE"
 for r in $(seq 1 "$RUNS"); do
-	t=$((TIMEFORMAT=%3R; time bash "$REPO_PATH/scripts/save-assistant-sessions.sh" >/dev/null 2>&1) 2>&1)
+	t=$((TIMEFORMAT=%3R; time python3 "$REPO_PATH/scripts/assistant_resurrect.py" save >/dev/null 2>&1) 2>&1)
 	echo "$t" >>"$TIMES_FILE"
 	printf 'run_%02d=%s\n' "$r" "$t"
 done

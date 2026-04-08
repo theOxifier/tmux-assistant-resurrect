@@ -16,39 +16,15 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-claude-pid.sh
 source "$HOOK_DIR/lib-claude-pid.sh"
 
-STATE_DIR="${TMUX_ASSISTANT_RESURRECT_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/tmux-assistant-resurrect}"
-mkdir -p -m 0700 "$STATE_DIR"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+RUNTIME="$HOOK_DIR/../scripts/assistant_resurrect.py"
 
-INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-
-if [ -z "$SESSION_ID" ]; then
-	exit 0
-fi
-
-CLAUDE_PID=$(find_claude_pid)
-
-# Build env object: always capture TMUX_PANE and SHELL, plus user-configured
-# vars from the tmux option @assistant-resurrect-capture-env (space-separated).
-ENV_JSON=$(jq -n --arg tmux_pane "${TMUX_PANE:-}" --arg shell "${SHELL:-}" \
-	'{tmux_pane: $tmux_pane, shell: $shell}')
-
+CLAUDE_PID="$(find_claude_pid)"
 CAPTURE_ENV=$(tmux show-option -gqv @assistant-resurrect-capture-env 2>/dev/null || true)
+
+export TMUX_PANE SHELL
 for var in $CAPTURE_ENV; do
-	# shellcheck disable=SC2086
-	ENV_JSON=$(echo "$ENV_JSON" | jq --arg k "$var" --arg v "${!var:-}" '. + {($k): $v}')
+	export "$var"
 done
 
-# Merge the full stdin JSON with our added fields + env.
-# This preserves all fields Claude sends (model, source, permission_mode, etc.)
-# and adds tool metadata for the save/restore scripts.
-STATE_FILE="$STATE_DIR/claude-$CLAUDE_PID.json"
-if ! echo "$INPUT" | jq \
-	--arg tool "claude" \
-	--argjson ppid "$CLAUDE_PID" \
-	--arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-	--argjson env "$ENV_JSON" \
-	'. + {tool: $tool, ppid: $ppid, timestamp: $timestamp, env: $env}' \
-	>"$STATE_FILE" 2>/dev/null; then
-	echo "tmux-assistant-resurrect: failed to write state file $STATE_FILE (permission denied?)" >&2
-fi
+exec "$PYTHON_BIN" "$RUNTIME" claude-hook-start "$CLAUDE_PID"

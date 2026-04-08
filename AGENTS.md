@@ -10,13 +10,11 @@ session IDs and restore them automatically.
 
 - `tmux-assistant-resurrect.tmux` -- TPM plugin entry point (sets tmux options, installs hooks)
 - `hooks/` -- Native hooks/plugins for each assistant tool (write session IDs to state files)
-- `scripts/lib-detect.sh` -- Shared library: `detect_tool()`, `pane_has_assistant()`, `posix_quote()`
-- `scripts/save-assistant-sessions.sh` -- Resurrect post-save hook (process detection + session IDs + enriched fields via `extract_cli_args()`)
-- `scripts/restore-assistant-sessions.sh` -- Resurrect post-restore hook (resumes assistants with CLI flags + env vars)
+- `scripts/assistant_resurrect.py` -- Python runtime for save/restore/clean/status and hook installation
 - `config/` -- tmux configuration snippet (used by `just install`, not TPM)
 - `docs/design-principles.md` -- Detection approach, session ID extraction, process title behavior
 - `justfile` -- Developer recipes (install, uninstall, status, test); end users use TPM
-- `test/` -- Docker-based integration tests with real CLI binaries
+- `test/` -- Python unit tests plus Docker-based integration tests with real CLI binaries
 
 ## Design constraints
 
@@ -28,6 +26,8 @@ session IDs and restore them automatically.
 - **TPM-only installation for end users**: Users install via TPM (`set -g @plugin
   'timvw/tmux-assistant-resurrect'` + `prefix + I`). The `justfile` recipes are
   for developers only.
+- **Python owns runtime behavior**: Save/restore/session-resolution logic lives
+  in `scripts/assistant_resurrect.py`. Do not reintroduce sourced-shell helper APIs.
 - **Pipe delimiter in tmux format output**: tmux 3.4 converts tabs and control
   characters in `-F` output. Use `|` as delimiter (documented limitation: paths
   containing `|` will break, but `|` is extremely rare in directory names).
@@ -35,19 +35,21 @@ session IDs and restore them automatically.
   injecting a resume command into a pane: (1) the pane's foreground process must
   be a known shell, and (2) the pane must not already have a running assistant
   in its process tree. Both must pass. This prevents typing into TUIs or
-  double-launching.
+  double-launching. After a command is injected, restore does not assume success:
+  it confirms that the assistant process actually appears in the pane tree and
+  retries panes whose first restore attempt was swallowed.
 - **Restore shell whitelist**: Guard 1 strips a leading `-` (login shells report
   as `-bash`, `-zsh`, etc.) then checks against a hardcoded whitelist: `bash`,
   `zsh`, `fish`, `sh`, `dash`, `ksh`, `tcsh`, `csh`, `nu`. If a user's shell
   isn't in this list, restore silently skips the pane. Update the whitelist in
-  `scripts/restore-assistant-sessions.sh` if needed.
+  `scripts/assistant_resurrect.py` if needed.
 
 ## Detection approach
 
 Agent detection uses direct process inspection: the save script takes a single
 `ps -eo pid=,ppid=,args=` snapshot and matches child processes of tmux pane
 shells against known assistant binary names via `detect_tool()` in
-`scripts/lib-detect.sh`.
+`scripts/assistant_resurrect.py`.
 
 Session ID extraction uses tool-native mechanisms (state files, process args,
 JSONL lookup, SQLite database) -- this is infrastructure plumbing, not heuristic
@@ -58,7 +60,7 @@ process args as a reliable fallback.
 
 ## Key conventions
 
-- All scripts use `set -euo pipefail`
+- Hooks use `set -euo pipefail`; the main runtime is Python
 - State files go to `$TMUX_ASSISTANT_RESURRECT_DIR` (default: `$XDG_RUNTIME_DIR` or `$TMPDIR` + `/tmux-assistant-resurrect`)
 - State files contain the full tool-provided context (merged from hook stdin /
   plugin events) plus plugin metadata (`tool`, `ppid`/`pid`, `timestamp`, `env`).
@@ -74,19 +76,17 @@ process args as a reliable fallback.
 - Log files go to `~/.tmux/resurrect/assistant-{save,restore}.log` (truncated to 500 lines per run)
 - Process inspection uses `ps -eo pid=,ppid=` (not `pgrep -P` -- unreliable on macOS)
 - Agent detection matches binary names via `case` patterns in `detect_tool()`
-- Hook matching in jq uses `(.command // "") | contains("claude-session-track")`
-  (not exact `==`) to tolerate quoting changes across versions and ensure backward
-  compatibility. The `// ""` null-coalescing prevents crashes on hook entries that
-  lack a `.command` field (e.g., URL-type hooks added by other tools)
-- Use `posix_quote()` from `lib-detect.sh` for any values sent to tmux panes
-  via `send-keys` (safe for bash, zsh, fish, and other POSIX-ish shells)
+- Hook matching should tolerate malformed entries that lack `.command`
+- Use the Python runtime's single-quote `posix_quote()` semantics for any values
+  sent to tmux panes via `send-keys` (safe for bash, zsh, fish, and other
+  POSIX-ish shells)
 - Hook command paths use single quotes (`bash '${CURRENT_DIR}/hooks/...'`);
   this breaks if the install path contains a single quote (unlikely with TPM)
 - The sidecar JSON (`assistant-sessions.json`) entries include enriched fields:
   `model` (from state file or `--model` in args), `cli_args` (from `ps` args
   with binary name and session/resume args stripped), `env` (from state file).
   All are optional for backward compatibility.
-- `extract_cli_args()` in `save-assistant-sessions.sh` strips per-tool session
+- `extract_cli_args()` in `scripts/assistant_resurrect.py` strips per-tool session
   args: Claude `--resume[= ]<id>`, OpenCode `--session[= ]<id>` and `-s <id>`,
   Codex `resume <id>`. Returns normalized whitespace-trimmed string.
 - The restore script only restores env vars listed in
@@ -137,15 +137,14 @@ just test
 just save                          # trigger a save manually
 just status                        # check installation status
 just clean                         # remove stale state files
-cat ~/.tmux/resurrect/assistant-sessions.json | jq .
+python3 -m json.tool ~/.tmux/resurrect/assistant-sessions.json
 cat ~/.tmux/resurrect/assistant-save.log
 cat ~/.tmux/resurrect/assistant-restore.log
 ```
 
 ### Test infrastructure notes
 
-- The save script has a `main()` guard so tests can `source` it to call
-  extraction functions directly without executing the full save flow.
+- Runtime internals are tested from Python unit tests, not by sourcing shell files.
 - Tests use polling helpers (`wait_for_child`, `wait_for_descendant`,
   `wait_for_death`) instead of fixed `sleep` -- fast on fast machines,
   tolerant on slow CI.
@@ -155,9 +154,9 @@ cat ~/.tmux/resurrect/assistant-restore.log
 
 ## Adding a new assistant
 
-1. Add a `case` pattern in `detect_tool()` in `scripts/lib-detect.sh`
-2. Add a `get_<tool>_session()` function in `scripts/save-assistant-sessions.sh`
-3. Add a restore command in `scripts/restore-assistant-sessions.sh`
+1. Extend `detect_tool()` in `scripts/assistant_resurrect.py`
+2. Add a `get_<tool>_session()` resolver in `scripts/assistant_resurrect.py`
+3. Extend `build_resume_command()` in `scripts/assistant_resurrect.py`
 4. Optionally add a hook/plugin in `hooks/` if the tool doesn't expose session IDs externally
 5. Update install/uninstall recipes in `justfile` and `tmux-assistant-resurrect.tmux` if a new hook was added
 6. Add tests in `test/run-tests.sh`
