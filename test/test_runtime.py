@@ -152,6 +152,39 @@ class OpenCodeSessionTests(TempEnvMixin, unittest.TestCase):
         self.assertEqual(runtime.get_opencode_session(99999, "opencode", "/tmp/oc-project", allow_db=False), "")
 
 
+class StateBackedDetectionTests(TempEnvMixin, unittest.TestCase):
+    def test_assistant_candidates_uses_state_file_when_args_hide_tool_name(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "opencode-4242.json").write_text(
+            json.dumps({"tool": "opencode", "session_id": "ses_hidden", "pid": 4242}) + "\n",
+            encoding="utf-8",
+        )
+        processes, children = runtime.parse_ps_snapshot(
+            "10 1 -zsh\n4242 10 /tmp/.tmpXYZ/runner --hidden-title\n"
+        )
+        candidates = runtime.assistant_candidates(
+            10,
+            processes,
+            children,
+            state_cache=runtime.state_file_cache(),
+        )
+        self.assertEqual([(candidate.pid, candidate.tool) for candidate in candidates], [(4242, "opencode")])
+
+    def test_pane_assistant_pid_uses_state_file_when_args_hide_tool_name(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "opencode-4242.json").write_text(
+            json.dumps({"tool": "opencode", "session_id": "ses_hidden", "pid": 4242}) + "\n",
+            encoding="utf-8",
+        )
+        processes, children = runtime.parse_ps_snapshot(
+            "10 1 -zsh\n4242 10 /tmp/.tmpXYZ/runner --hidden-title\n"
+        )
+        self.assertEqual(
+            runtime.pane_assistant_pid(10, processes, children, state_cache=runtime.state_file_cache()),
+            4242,
+        )
+
+
 class CodexSessionTests(TempEnvMixin, unittest.TestCase):
     def test_resume_arg_extraction(self) -> None:
         self.assertEqual(runtime.get_codex_session(99999, "codex resume ses_codex_789"), "ses_codex_789")

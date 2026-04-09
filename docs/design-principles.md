@@ -35,10 +35,10 @@ before hooks/plugins have fired):
 - **Claude Code**: `SessionStart` hook state file keyed by Claude's PID
   (primary); `--resume <id>` in process args (fallback -- note: Claude
   overwrites its process title, so this only works if args are still visible)
-- **OpenCode**: `-s` / `--session` flag in process args (fast path); plugin
-  state file (fallback for runtime session switches); SQLite database query
-  at `~/.local/share/opencode/opencode.db` matching the pane's cwd (version-
-  resilient fallback when the plugin hasn't fired)
+- **OpenCode**: plugin state file keyed by the OpenCode PID (primary for live
+  saves); `-s` / `--session` in process args (fallback when the state file is
+  not available). The live save path intentionally does not trust cwd-based DB
+  lookups, because accuracy matters more than recovering an ambiguous session.
 - **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl` (primary when
   available); explicit UUID / named-thread / rollout / SQLite evidence
   (ordered fallback chain); `resume <id>` in process args (last resort)
@@ -63,7 +63,8 @@ To add support for a new tool:
 - **OpenCode** is a native Go binary (distributed via npm as `opencode-ai`
   or installed via `opencode upgrade`). Like Claude, the Go binary overwrites
   its process title, so `-s <id>` is NOT visible in `ps`. The plugin state
-  file and SQLite database fallback are the reliable sources of session IDs.
+  file is the reliable source of live session IDs; explicit `-s` / `--session`
+  args are still usable when visible.
 
 ## macOS considerations
 

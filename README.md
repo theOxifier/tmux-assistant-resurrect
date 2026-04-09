@@ -1,99 +1,208 @@
 # tmux-assistant-resurrect
 
-> **Disclaimer**: This project was designed and implemented through iterative
-> work with AI coding assistants. It has Python unit coverage, Docker-based
-> integration coverage with real CLI binaries, and isolated tmux benchmark
-> tooling, but still has limited production usage. Expect rough edges.
-
 Persist and restore AI coding assistant sessions across tmux restarts and reboots.
 
-This repository is a fork of the original
-[`timvw/tmux-assistant-resurrect`](https://github.com/timvw/tmux-assistant-resurrect).
-The current implementation is a substantial rewrite around a Python runtime for
-save/restore orchestration. The TPM entrypoints and assistant-native hooks
-remain, but the shell-heavy save/restore core has been replaced.
+This fork supports:
 
-This fork remains MIT-licensed and preserves the upstream MIT copyright and
-permission notice. See [License](#license) below.
+- [Claude Code](https://github.com/anthropics/claude-code)
+- [OpenCode](https://github.com/opencode-ai/opencode)
+- [Codex CLI](https://github.com/openai/codex)
+
+It integrates with [tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect)
+and [tmux-continuum](https://github.com/tmux-plugins/tmux-continuum) to save
+assistant session IDs, working directories, CLI flags, and selected environment
+variables, then resume those sessions after restore.
+
+This repository is a fork of
+[`timvw/tmux-assistant-resurrect`](https://github.com/timvw/tmux-assistant-resurrect).
+The runtime has been substantially rewritten around Python, but the fork
+remains MIT-licensed and preserves upstream attribution.
 
 ![Save, kill, and restore — assistant sessions resume automatically](docs/images/demo-save-restore.gif)
 
-When your computer shuts down, tmux sessions are lost -- including any running
-[Claude Code](https://github.com/anthropics/claude-code),
-[OpenCode](https://github.com/opencode-ai/opencode), or
-[Codex CLI](https://github.com/openai/codex) instances. This project hooks into
-[tmux-resurrect](https://github.com/tmux-plugins/tmux-resurrect) to
-automatically save assistant session IDs, CLI flags, and environment variables,
-then re-launch them with the exact same configuration after a restore.
+## What It Restores
 
-## How it works
+- The assistant session ID
+- The original pane target
+- The pane working directory
+- CLI flags that should survive restore
+- Environment variables listed in `@assistant-resurrect-capture-env`
 
-```
-SAVE (every 5 min + manual prefix+Ctrl-s)
-  tmux-resurrect saves pane layouts
-    -> Python save runtime inspects child processes of each pane
-    -> detects assistants by binary name (claude, opencode, codex)
-    -> extracts session IDs via native hooks/plugins/process args
-    -> writes ~/.tmux/resurrect/assistant-sessions.json
+Codex restore is evidence-based, so both named and unnamed Codex sessions are
+supported.
 
-RESTORE (on tmux start or manual prefix+Ctrl-r)
-  tmux-resurrect restores pane layouts
-    -> Python restore runtime reads assistant-sessions.json
-    -> reconstructs full CLI invocation with saved flags + env vars
-    -> retries panes that swallow the first restore command
-    -> confirms the assistant process appears before marking restore complete
-    -> sends resume commands to each pane, e.g.:
-         ANTHROPIC_BASE_URL='...' claude --dangerously-skip-permissions --resume <id>
-         opencode --verbose -s <session-id>
-         codex --full-auto resume <session-id>
+## Install
+
+Prerequisites:
+
+- `tmux`
+- `python3` 3.9+
+- [TPM](https://github.com/tmux-plugins/tpm)
+- At least one of `claude`, `opencode`, or `codex`
+
+If you do not already have TPM:
+
+```bash
+git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
 ```
 
-## Design
+Add this to `~/.tmux.conf`:
 
-Detection is done via direct process inspection: the Python runtime takes a
-single `ps` snapshot of all processes, finds children of each tmux pane shell,
-and matches known assistant binary names (`claude`, `opencode`, `codex`).
+```tmux
+set -g @plugin 'tmux-plugins/tpm'
+set -g @plugin 'tmux-plugins/tmux-resurrect'
+set -g @plugin 'tmux-plugins/tmux-continuum'
+set -g @plugin 'theOxifier/tmux-assistant-resurrect'
 
-Session ID extraction uses tool-native mechanisms (infrastructure plumbing):
+# Optional: capture extra env vars and replay them on restore
+# set -g @assistant-resurrect-capture-env 'VIRTUAL_ENV NODE_ENV'
 
-| Tool | Primary method | Fallback 1 | Fallback 2 | Notes |
-|------|---------------|------------|------------|-------|
-| **Claude Code** | `SessionStart` hook state file (keyed by Claude PID) | `--resume` in process args | - | Claude overwrites its process title, so args fallback only works if args are visible |
-| **OpenCode** | Plugin state file | `-s` / `--session` in process args | SQLite DB query (`~/.local/share/opencode/opencode.db`) | DB fallback matches the most recently updated session by cwd |
-| **Codex CLI** | PID lookup in `~/.codex/session-tags.jsonl` | Explicit UUID / named-thread / rollout / SQLite evidence | `resume` in process args | Resolver is evidence-based so both named and unnamed sessions restore |
+# Optional: restore scrollback for non-assistant panes
+# set -g @resurrect-capture-pane-contents 'on'
 
-Each tool has a primary and fallback extraction method. Fallbacks address the
-chicken-and-egg problem: after a restore, session IDs are in process args even
-before hooks/plugins have fired. The OpenCode SQLite database fallback provides
-version-resilient session ID extraction even when the plugin hasn't fired.
+run '~/.tmux/plugins/tpm/tpm'
+```
 
-## Fork direction
+Then inside tmux press `prefix + I`.
 
-This fork is intentionally optimized around a simpler runtime model than the
-original shell-first implementation:
+The plugin will:
 
-- One Python process owns save/restore logic instead of spreading parsing and
-  fallback logic across shell, `jq`, `sed`, `awk`, and inline Python snippets.
-- Save takes one tmux pane snapshot and one `ps` snapshot, then resolves all
-  assistants in memory.
-- Restore polls for pane readiness instead of relying on fixed sleeps.
-- Restore only counts success after the assistant process remains alive through
-  a confirmation window, which reduces false-positive restores.
-- Save logs pane-level additions, drops, and updates before overwriting the
-  sidecar, which makes missed-session investigations much faster.
-- Test and benchmark tooling use isolated tmux sockets so development commands
-  cannot touch a live tmux server.
+- enable tmux-resurrect and tmux-continuum hooks for assistant save/restore
+- install Claude hooks into `~/.claude/settings.json`
+- link the OpenCode session tracker into `~/.config/opencode/plugins/`
 
-The goal is not just fewer dependencies. It is a more deterministic platform
-for debugging save/restore correctness.
+## Use
+
+Once installed, the normal tmux-resurrect flow is enough:
+
+- `prefix + Ctrl-s` saves tmux state and assistant sessions
+- `prefix + Ctrl-r` restores tmux state and resumes assistants
+
+By default, tmux-continuum also saves every 5 minutes and restores on tmux
+server start.
+
+## Verify
+
+Launch one or more assistants in tmux, then save:
+
+```bash
+python3 -m json.tool ~/.tmux/resurrect/assistant-sessions.json
+```
+
+You should see entries like:
+
+```json
+{
+  "pane": "my-project:0.0",
+  "tool": "claude",
+  "session_id": "01abc...",
+  "cwd": "/home/user/src/my-project",
+  "cli_args": "--dangerously-skip-permissions --model claude-opus-4-6",
+  "env": {
+    "tmux_pane": "%1",
+    "shell": "/bin/zsh",
+    "ANTHROPIC_BASE_URL": "https://proxy.internal"
+  }
+}
+```
+
+After a restore, check:
+
+```bash
+cat ~/.tmux/resurrect/assistant-restore.log
+```
+
+and:
+
+```bash
+cat ~/.tmux/resurrect/assistant-save.log
+```
+
+The restore log should show which panes were resumed and whether launch was
+confirmed.
+
+## Configuration
+
+### Capture Extra Environment Variables
+
+To replay extra env vars on restore:
+
+```tmux
+set -g @assistant-resurrect-capture-env 'VIRTUAL_ENV NODE_ENV CONDA_DEFAULT_ENV'
+```
+
+Only variables listed there are restored. Built-in tracking values like
+`TMUX_PANE` and `SHELL` are captured for state, but are not replayed.
+
+### Pane Contents
+
+If you want tmux-resurrect to restore scrollback for normal panes:
+
+```tmux
+set -g @resurrect-capture-pane-contents 'on'
+```
+
+When this is enabled, assistant pane contents are stripped from the pane
+archive so stale TUI output does not flash before the assistant resumes.
+
+## How It Works
+
+Save:
+
+- one tmux pane snapshot
+- one `ps` snapshot
+- assistant detection by binary name
+- session ID resolution using tool-native state
+- write `~/.tmux/resurrect/assistant-sessions.json`
+
+Restore:
+
+- wait for a target pane to be ready
+- `cd` back to the saved working directory
+- replay env vars and CLI flags
+- retry panes that swallow the first restore command
+- only count success after the assistant process stays up through a short
+  confirmation window
+
+Session ID sources:
+
+| Tool | Primary source | Fallbacks |
+|------|----------------|-----------|
+| Claude | SessionStart hook state file | `--resume` in process args |
+| OpenCode | Plugin state file | `-s` / `--session` args |
+| Codex | `~/.codex/session-tags.jsonl` | explicit UUID, thread metadata, rollout metadata, SQLite, `resume` args |
+
+For deeper implementation details, see
+[docs/design-principles.md](docs/design-principles.md).
+
+## Troubleshooting
+
+| Problem | What to check |
+|---------|---------------|
+| No sessions saved | Run `ps -eo pid=,ppid=,args= | grep -E 'claude|opencode|codex'` |
+| Claude session missing | Check `~/.claude/settings.json` for `claude-session-track` |
+| OpenCode session missing | Check `~/.config/opencode/plugins/session-tracker.js` |
+| Restore says session not found | The assistant session itself may have expired; start a new one and save again |
+| OpenCode session missing after save | Make sure the OpenCode plugin is installed; the live save path will not guess from cwd alone |
+| Assistants launch twice | Make sure assistants are not listed in `@resurrect-processes` |
+
+## Uninstall
+
+Remove the plugin line from `~/.tmux.conf`:
+
+```tmux
+set -g @plugin 'theOxifier/tmux-assistant-resurrect'
+```
+
+Then press `prefix + Alt-u` to let TPM remove plugins no longer listed in your
+tmux config.
 
 ## Performance
 
-The biggest runtime improvement from this fork is on the save path. A local
-isolated benchmark on April 9, 2026 compared this fork's Python save runtime
-against upstream commit `6be6d82` (the last shell-based upstream revision in
-this repo history), using mock Claude processes, 5 timed runs per scenario, and
-an isolated tmux socket:
+This fork's biggest measured gain is on the save path. On April 9, 2026, a
+local isolated benchmark compared the current Python runtime against upstream
+commit `6be6d82` using mock Claude processes, 5 timed runs per scenario, and an
+isolated tmux socket:
 
 | Scenario | Upstream avg | Fork avg | Speedup | Reduction |
 |----------|-------------:|---------:|--------:|----------:|
@@ -101,433 +210,42 @@ an isolated tmux socket:
 | 124 panes / 60 assistants | 0.164s | 0.130s | 1.26x | 20.7% |
 | 124 panes / 100 assistants | 0.154s | 0.132s | 1.17x | 14.3% |
 
-Across those scenarios, the measured save-hook average dropped from `0.162s` to
-`0.134s`, or about `17.7%` faster overall.
+Across those scenarios, the save-hook average improved from `0.162s` to
+`0.134s`, about `17.7%` faster overall.
 
-Those numbers are for the save hook only. Restore improvements are primarily
-about correctness and stability: removing blind sleeps, retrying swallowed
-launches, and requiring durable launch confirmation before counting a pane as
-restored.
+Restore improvements in this fork are more about correctness than raw wall
+clock time: no blind sleeps, launch retries, pane safety guards, and durable
+launch confirmation.
 
-## Prerequisites
+## For Developers
 
-- [tmux](https://github.com/tmux/tmux) (tested with 3.x)
-- [TPM](https://github.com/tmux-plugins/tpm) (Tmux Plugin Manager)
-- [python3](https://www.python.org/) 3.9+ (used by the plugin runtime)
-- At least one of: Claude Code, OpenCode, Codex CLI
+The `justfile` is for development, not normal TPM usage.
 
-## Installation
-
-Install [TPM](https://github.com/tmux-plugins/tpm) if you don't have it:
+Useful commands:
 
 ```bash
-git clone https://github.com/tmux-plugins/tpm ~/.tmux/plugins/tpm
-```
-
-Add to your `~/.tmux.conf`:
-
-```bash
-set -g @plugin 'tmux-plugins/tpm'
-set -g @plugin 'tmux-plugins/tmux-resurrect'
-set -g @plugin 'tmux-plugins/tmux-continuum'
-set -g @plugin 'theOxifier/tmux-assistant-resurrect'
-
-# Optional: restore terminal text in non-assistant panes after tmux restart.
-# If enabled, the plugin automatically strips captured content for assistant
-# panes so restore won't briefly flash stale TUI output before resuming.
-# set -g @resurrect-capture-pane-contents 'on'
-
-# Initialize TPM (must be last line)
-run '~/.tmux/plugins/tpm/tpm'
-```
-
-Then inside tmux, press `prefix + I` (capital I). TPM will clone the plugins
-and automatically set up:
-
-- tmux-resurrect + tmux-continuum settings
-- Claude Code hooks in `~/.claude/settings.json`
-- OpenCode session-tracker plugin in `~/.config/opencode/plugins/`
-
-## Uninstallation
-
-Remove the `@plugin 'theOxifier/tmux-assistant-resurrect'` line from `~/.tmux.conf`,
-then press `prefix + alt + u` inside tmux.
-
-## Usage
-
-### Automatic (recommended)
-
-Once installed, everything runs automatically:
-
-- **tmux-continuum** saves your tmux layout every 5 minutes
-- **Post-save hook** collects assistant session IDs at each save
-- **On tmux server start**, continuum auto-restores the layout
-- **Post-restore hook** resumes each assistant with its saved session ID
-
-Manual save/restore keybindings (tmux-resurrect defaults):
-
-| Key | Action |
-|-----|--------|
-| `prefix + Ctrl-s` | Save tmux state + assistant sessions |
-| `prefix + Ctrl-r` | Restore tmux state + resume assistants |
-
-## Repository structure
-
-```
-tmux-assistant-resurrect.tmux     # TPM plugin entry point
-config/
-  resurrect-assistants.conf       # tmux config reference template (not sourced automatically)
-hooks/
-  lib-claude-pid.sh               # Shared helper: walks process tree to find Claude PID
-  claude-session-track.sh         # Claude SessionStart hook (writes session ID)
-  claude-session-cleanup.sh       # Claude SessionEnd hook (removes state file)
-  opencode-session-track.js       # OpenCode plugin (tracks session ID + cleanup)
-scripts/
-  assistant_resurrect.py          # Core runtime (save, restore, Claude hook handlers)
-  assistant_admin.py              # Admin/runtime setup (install, uninstall, status, clean)
-test/
-  Dockerfile                      # Docker image with tmux, just, python3, jq, and real assistant CLIs
-  test_runtime.py                 # Python unit tests for runtime internals
-  bench-save-hook.sh              # Single-scenario save-hook benchmark runner (inside Docker)
-  bench-matrix.sh                 # Docker benchmark matrix + CSV/Markdown summary generator
-  run-tests.sh                    # Integration test suite
-justfile                          # Install/uninstall/status/save/restore/test recipes
-```
-
-## Testing
-
-### Automated tests (Docker)
-
-The full test suite runs in Docker with real CLI binaries (no mocks):
-
-```bash
+just status
+just save
+just restore
+just clean
 just test
-```
-
-The integration and benchmark scripts run tmux against an isolated socket with
-`TMUX` unset, so they do not target or kill a user's live tmux server.
-
-This builds a Docker image with tmux, just, python3, and the real
-`@anthropic-ai/claude-code`, `opencode-ai`, and `@openai/codex` npm packages,
-then runs Python unit tests plus Docker integration coverage for install, save,
-restore, uninstall, hooks, cleanup, TPM plugin installation, and regression
-scenarios. No API keys are needed — the tests exercise the process detection
-and session management layer, not the AI functionality.
-
-### Performance benchmarks (Docker)
-
-Run a benchmark matrix and capture results as CSV + Markdown:
-
-```bash
 just benchmark
 ```
 
-To compare your current checkout against another repo path (for example a
-worktree on `main`):
-
-```bash
-just benchmark base_repo=/path/to/base/worktree
-```
-
-Results are written to:
-
-- `test-results/benchmark.csv`
-- `test-results/benchmark.md`
-
-On GitHub Actions (`.github/workflows/test.yml`), the benchmark matrix runs on
-every push/PR, publishes a step-summary table, and uploads the same CSV/Markdown
-files as the `benchmark-results` artifact.
-
-### Try it yourself
-
-You can verify the full save → kill → restore cycle on your own machine using
-the normal TPM installation — no cloning or build tools needed.
-
-**Prerequisites**: tmux, python3, and at least one of claude / opencode /
-codex installed.
-
-#### 1. Install
-
-Follow the [Installation](#installation) steps above (install TPM, add the
-plugin lines to `~/.tmux.conf`, press `prefix + I` inside tmux).
-
-#### 2. Launch some assistants
-
-Start assistants in separate tmux windows or sessions — just like you normally
-would:
-
-```bash
-# In one tmux window:
-cd ~/src/my-project
-claude
-
-# In another window:
-cd ~/src/other-project
-opencode
-```
-
-Work with them for a bit so the session hooks fire (Claude's `SessionStart`
-hook writes the session ID to disk automatically).
-
-#### 3. Save
-
-Press `prefix + Ctrl-s` (the tmux-resurrect save keybinding). This saves the
-tmux layout **and** runs the assistant save hook, which detects running
-assistants and writes their session IDs to
-`~/.tmux/resurrect/assistant-sessions.json`.
-
-You can inspect what was saved:
-
-```bash
-python3 -m json.tool ~/.tmux/resurrect/assistant-sessions.json
-```
-
-Example output:
-
-```json
-{
-  "timestamp": "2026-02-15T20:34:28Z",
-  "sessions": [
-    {
-      "pane": "my-project:0.0",
-      "tool": "claude",
-      "session_id": "01abc...",
-      "cwd": "/home/user/src/my-project",
-      "cli_args": "--dangerously-skip-permissions --model claude-opus-4-6",
-      "env": {"tmux_pane": "%1", "shell": "/bin/zsh", "ANTHROPIC_BASE_URL": "https://proxy.internal"}
-    },
-    {
-      "pane": "other-project:0.0",
-      "tool": "opencode",
-      "session_id": "ses_xyz...",
-      "cwd": "/home/user/src/other-project",
-      "cli_args": "",
-      "env": {"tmux_pane": "%2", "shell": "/bin/zsh"}
-    }
-  ]
-}
-```
-
-#### 4. Kill tmux (simulate a reboot)
-
-```bash
-tmux kill-server
-```
-
-Everything is gone — all sessions, all panes, all running assistants.
-
-#### 5. Restore
-
-Start tmux again:
-
-```bash
-tmux
-```
-
-Then press `prefix + Ctrl-r` (the tmux-resurrect restore keybinding).
-
-tmux-resurrect recreates your sessions, windows, and panes. The post-restore
-hook then reads the saved assistant sessions and sends the correct resume
-command to each pane, preserving the original CLI flags and environment:
-
-- `claude --dangerously-skip-permissions --model opus --resume <session-id>`
-- `opencode -s <session-id>`
-- `ANTHROPIC_BASE_URL='...' codex resume <session-id>`
-
-If the session was launched with flags like `--dangerously-skip-permissions` or
-`--model`, those flags are captured from `ps` at save time and replayed on
-restore. Environment variables configured via `@assistant-resurrect-capture-env`
-are prepended to the resume command.
-
-#### 6. Verify
-
-Check the restore log to see what happened:
-
-```bash
-cat ~/.tmux/resurrect/assistant-restore.log
-```
-
-You should see lines like:
-
-```
-[2026-02-15T20:34:31Z] restoring 2 assistant session(s)...
-[2026-02-15T20:34:31Z] restoring claude in my-project:0.0 (session: 01abc..., cmd: claude --dangerously-skip-permissions --resume '01abc...')
-[2026-02-15T20:34:32Z] restoring opencode in other-project:0.0 (session: ses_xyz..., cmd: opencode -s 'ses_xyz...')
-[2026-02-15T20:34:33Z] restored 2 of 2 assistant session(s)
-```
-
-The save log is also available if you want to see what was detected:
-
-```bash
-cat ~/.tmux/resurrect/assistant-save.log
-```
-
-### Troubleshooting
-
-| Symptom | Check |
-|---------|-------|
-| Save finds 0 sessions | Run `ps -eo pid=,ppid=,args= \| grep -E 'claude\|opencode\|codex'` to verify assistants are running |
-| Session ID missing for Claude | Verify the hook is installed: `grep -n "claude-session-track" ~/.claude/settings.json` |
-| Session ID missing for OpenCode | Launch with `-s <id>`, or verify the plugin: `ls ~/.config/opencode/plugins/session-tracker.js` |
-| Restore launches but assistant says "session not found" | The session ID may have expired. This is normal — start a fresh session and the next save will pick up the new ID |
-| Assistants launch twice after restore | Make sure assistants are **not** listed in `@resurrect-processes` — the plugin handles all resuming via the post-restore hook |
-| `just test` fails with Docker errors | Ensure Docker is running and you have network access (the image pulls npm packages) |
-
-## Configuration
-
-### State directory
-
-Session tracking files are written to a per-user temporary directory:
-
-| Platform | Default path |
-|----------|-------------|
-| **Linux (systemd)** | `$XDG_RUNTIME_DIR/tmux-assistant-resurrect` (e.g., `/run/user/1000/tmux-assistant-resurrect`) |
-| **macOS** | `$TMPDIR/tmux-assistant-resurrect` (e.g., `/var/folders/.../T/tmux-assistant-resurrect`) |
-| **Fallback** | `/tmp/tmux-assistant-resurrect` (only if both `XDG_RUNTIME_DIR` and `TMPDIR` are unset) |
-
-This avoids permission conflicts on multi-user systems. Override with:
-
-```bash
-export TMUX_ASSISTANT_RESURRECT_DIR=/path/to/state
-```
-
-Note: state files are transient — they track running assistant PIDs and session
-IDs while tmux is active. The persistent sidecar JSON
-(`~/.tmux/resurrect/assistant-sessions.json`) is what survives reboots and lives
-in your home directory.
-
-### Environment variable capture and restoration
-
-By default, the plugin captures `TMUX_PANE` and `SHELL` in each assistant's
-state file. To capture additional environment variables, set a space-separated
-list in `tmux.conf`:
-
-```bash
-set -g @assistant-resurrect-capture-env 'VIRTUAL_ENV NODE_ENV CONDA_DEFAULT_ENV'
-```
-
-Captured variables are stored in the state file's `env` object and propagated
-to `assistant-sessions.json`. On restore, variables listed in
-`@assistant-resurrect-capture-env` are prepended to the resume command:
-
-```
-VIRTUAL_ENV='/home/user/.venv' claude --resume <session-id>
-```
-
-Built-in variables (`TMUX_PANE`, `SHELL`) are **not** restored — `TMUX_PANE`
-would be stale after restore, and `SHELL` is already in the environment.
-State files live in a user-only directory (mode 0700).
-
-> **Note:** Avoid capturing secrets (API keys, tokens). State files and the
-> sidecar JSON persist to disk and may outlive the process they were captured
-> from.
-
-### Continuum save interval
-
-Edit `config/resurrect-assistants.conf`:
-
-```
-set -g @continuum-save-interval '5'  # minutes
-```
-
-### Adding support for a new assistant
-
-To add a new AI coding assistant:
-
-1. **Detection**: Extend `detect_tool()` in `scripts/assistant_resurrect.py`
-   to recognize the tool's binary name
-2. **Session ID extraction**: Add a `get_<tool>_session()` resolver in the
-   Python runtime
-3. **Restore command**: Extend `build_resume_command()` in the Python runtime
-4. **Session tracking** (optional): If the tool doesn't expose its session ID in
-   process args or a known file, create a hook/plugin similar to the existing
-   ones
-5. Update install/uninstall recipes in `justfile` if a new hook was added
-
-## How each component works
-
-### Claude Code hooks (`hooks/claude-session-track.sh`, `hooks/claude-session-cleanup.sh`)
-
-Two hooks configured in `~/.claude/settings.json`:
-
-- **`SessionStart`**: Claude Code passes JSON on stdin (including `session_id`,
-  `model`, `source`, `permission_mode`, `transcript_path`, and more). The shell
-  hook only resolves Claude's PID, then hands the payload to the Python runtime,
-  which merges it with plugin metadata (`tool`, `ppid`, `timestamp`, `env`) and
-  writes `$STATE_DIR/claude-<PID>.json`.
-- **`SessionEnd`**: Removes the state file when the Claude session exits,
-  preventing stale entries.
-
-**Note**: Claude Code sets `process.title = 'claude'`, but on macOS arm64
-(v2.1.44+) `ps -eo args=` still shows full args. The state file remains the
-primary source of session IDs, with process args as a fallback. CLI flags like
-`--dangerously-skip-permissions` are captured from `ps` by the save script's
-`extract_cli_args()` function.
-
-### OpenCode plugin (`hooks/opencode-session-track.js`)
-
-An OpenCode plugin that listens for `session.created`, `session.updated`, and
-`session.idle` events. On each event, it captures the full session object
-(including model, title, and other metadata) along with init-time context
-(`process.argv`, client API surface) and writes it to
-`$STATE_DIR/opencode-<PID>.json`. This handles the case where
-a user switches sessions at runtime (via `/sessions` or `Ctrl+x l`). The plugin
-also cleans up its state file on process exit (SIGINT, SIGTERM).
-
-### Codex CLI
-
-Codex persists session state natively. Older versions write PID-to-session
-mappings in `~/.codex/session-tags.jsonl`; current versions persist threads in
-`~/.codex/state_*.sqlite`. The save script prefers the PID mapping when
-available, then falls back to the most recently updated non-archived thread for
-the pane's cwd, and only then falls back to parsing `codex resume ...` args.
-This keeps restores stable even after a Codex thread is renamed.
-
-### Save hook (`scripts/assistant_resurrect.py save`)
-
-The Python save runtime takes a single `ps` snapshot, a single tmux pane
-snapshot, resolves assistant session IDs using tool-specific evidence, and
-writes `~/.tmux/resurrect/assistant-sessions.json`. It also captures:
-
-- **CLI flags** (`cli_args`): extracted from `ps` args with the binary name and
-  session/resume args stripped (e.g., `--dangerously-skip-permissions --model opus`)
-- **Environment** (`env`): from state file (captured by hooks/plugins)
-
-Writes everything to `~/.tmux/resurrect/assistant-sessions.json`.
-
-### Restore hook (`scripts/assistant_resurrect.py restore`)
-
-The Python restore runtime batch-reads pane state, polls for shell readiness
-instead of sleeping blindly, reconstructs `<env_prefix> <binary> <cli_args>
-<resume_arg>`, and sends the command to each pane via `tmux send-keys`. If
-enriched fields are missing (old-format JSON), it falls back to bare resume
-commands.
+The test and benchmark scripts run tmux on isolated sockets so they do not
+target a live tmux server.
 
 ## Limitations
 
-- **Running state is not preserved**: Assistants restart with their conversation
-  history loaded, but any in-flight tool calls or pending operations are lost.
-- **First save after install (chicken-and-egg)**: On initial install, no session
-  IDs exist yet. Assistants must complete at least one session (triggering the
-  hooks) before their IDs can be saved. For Codex and OpenCode with `-s`, this
-  is not an issue since session IDs are visible in process args.
-- **Claude process title**: Claude Code sets `process.title = 'claude'`, but on
-  macOS arm64 (v2.1.44+) `ps -eo args=` still shows full args. CLI flags like
-  `--dangerously-skip-permissions` are captured from `ps` at save time. If a
-  future version hides args, `cli_args` will be empty and restore falls back to
-  bare resume commands.
-- **OpenCode without plugin**: If the OpenCode plugin isn't installed and the
-  process was started without `-s`, the session ID cannot be detected.
-- **OpenCode DB fallback (same-cwd ambiguity)**: When the plugin state file is
-  unavailable and no `-s` flag was used, the save script falls back to the
-  OpenCode SQLite database, matching sessions by working directory. If multiple
-  sessions share the same cwd, the most recently updated one is picked — which
-  may not be the correct one for that specific pane.
-- **Process inspection on macOS**: Uses `ps -eo pid=,ppid=` instead of `pgrep -P`
-  due to reliability issues with `pgrep` on macOS.
-- **Pane matching after restore**: tmux-resurrect preserves pane indices, so the
-  restore hook targets the same `session:window.pane` addresses. If you manually
-  rearrange panes between save and restore, the mapping may be wrong.
+- Running tool state is not preserved; conversation state is restored, but
+  in-flight operations are lost.
+- Claude CLI flags depend on `ps` visibility. If a future version hides args,
+  restore falls back to a bare resume command.
+- OpenCode save is accuracy-first: if the plugin state file is missing and
+  there is no explicit `-s` / `--session` flag, the session is skipped instead
+  of guessed from cwd metadata.
+- Pane targeting assumes tmux-resurrect restores the same pane layout. If you
+  manually change the layout between save and restore, the mapping can be wrong.
 
 ## License
 
@@ -535,6 +253,7 @@ This fork remains under the MIT License.
 
 - Original project: `timvw/tmux-assistant-resurrect`
 - Upstream copyright notice and permission notice are preserved in `LICENSE`
+- Fork modifications are additionally marked `Copyright (c) 2026 Sean Hunter Rea`
 - New modifications in this fork are distributed under the same MIT terms
 
 That means you can use, modify, and redistribute this fork, but the MIT notice

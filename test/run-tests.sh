@@ -348,11 +348,13 @@ just save 2>&1
 
 # Verify output file
 SAVED="$HOME/.tmux/resurrect/assistant-sessions.json"
+RESTORE_FIXTURE="/tmp/assistant-restore-fixture.json"
 assert_file_exists "assistant-sessions.json created" "$SAVED"
+cp "$SAVED" "$RESTORE_FIXTURE"
 
 session_count=$(jq '.sessions | length' "$SAVED")
 # We expect: claude (1) + opencode with -s (1) + codex (1) = 3 with session IDs
-# opencode-nosid detected but no session ID, so excluded from sessions array
+# opencode-nosid must be excluded instead of guessed from cwd metadata
 # lsp subprocess should be excluded entirely
 if [ "$session_count" -ge 3 ]; then
 	pass "Detected at least 3 assistant sessions (got $session_count)"
@@ -367,6 +369,11 @@ assert_eq "Claude session ID extracted" "ses_claude_test_123" "$claude_sid"
 # Verify OpenCode was detected with correct session ID (from plugin state file)
 opencode_sid=$(jq -r '[.sessions[] | select(.tool == "opencode" and .session_id != "")] | first | .session_id' "$SAVED")
 assert_eq "OpenCode session ID extracted from plugin state file" "ses_opencode_test_456" "$opencode_sid"
+
+# Verify OpenCode without a trusted session source is excluded rather than
+# guessed from the newest SQLite row for the cwd.
+nosid_count=$(jq '[.sessions[] | select(.pane | contains("test-opencode-nosid"))] | length' "$SAVED")
+assert_eq "OpenCode without a session ID is excluded" "0" "$nosid_count"
 
 # Verify Codex was detected with correct session ID (from session-tags.jsonl)
 codex_sid=$(jq -r '.sessions[] | select(.tool == "codex") | .session_id' "$SAVED")
@@ -459,6 +466,11 @@ for sess in test-claude test-opencode test-codex test-opencode-nosid test-lsp te
 	kill_pane_children "$sess"
 done
 sleep 1
+
+# Use the first save as the restore fixture. Real OpenCode exits quickly in the
+# test environment, so restore verification should not depend on a later live
+# save still seeing the original pane.
+cp "$RESTORE_FIXTURE" "$HOME/.tmux/resurrect/assistant-sessions.json"
 
 # Run restore
 just restore 2>&1

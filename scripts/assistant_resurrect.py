@@ -249,7 +249,24 @@ def parse_pane_snapshot(snapshot: str, *, include_command: bool = False) -> dict
     return panes
 
 
-def pane_assistant_pid(root_pid: int, processes: dict[int, ProcessInfo], children: dict[int, list[int]]) -> int | None:
+def resolved_process_tool(process: ProcessInfo, state_cache: dict[str, dict[str, Any]] | None = None) -> str | None:
+    if process.tool:
+        return process.tool
+    if not state_cache:
+        return None
+    data = state_cache.get(str(process.pid))
+    if not isinstance(data, dict):
+        return None
+    tool = data.get("tool")
+    return tool if tool in {"claude", "opencode"} else None
+
+
+def pane_assistant_pid(
+    root_pid: int,
+    processes: dict[int, ProcessInfo],
+    children: dict[int, list[int]],
+    state_cache: dict[str, dict[str, Any]] | None = None,
+) -> int | None:
     root = processes.get(root_pid)
     if root and root.tool:
         return root.pid
@@ -257,18 +274,24 @@ def pane_assistant_pid(root_pid: int, processes: dict[int, ProcessInfo], childre
     while queue:
         pid = queue.popleft()
         proc = processes.get(pid)
-        if proc and proc.tool:
+        if proc and resolved_process_tool(proc, state_cache):
             return proc.pid
         queue.extend(children.get(pid, []))
     return None
 
 
-def assistant_candidates(root_pid: int, processes: dict[int, ProcessInfo], children: dict[int, list[int]]) -> list[ProcessInfo]:
+def assistant_candidates(
+    root_pid: int,
+    processes: dict[int, ProcessInfo],
+    children: dict[int, list[int]],
+    state_cache: dict[str, dict[str, Any]] | None = None,
+) -> list[ProcessInfo]:
     found: list[ProcessInfo] = []
     seen: set[int] = set()
     root = processes.get(root_pid)
-    if root and root.tool:
-        found.append(root)
+    root_tool = root.tool if root else None
+    if root and root_tool:
+        found.append(ProcessInfo(pid=root.pid, ppid=root.ppid, args=root.args, tool=root_tool))
         seen.add(root.pid)
     queue: deque[int] = deque(children.get(root_pid, []))
     while queue:
@@ -277,8 +300,9 @@ def assistant_candidates(root_pid: int, processes: dict[int, ProcessInfo], child
             continue
         seen.add(pid)
         proc = processes.get(pid)
-        if proc and proc.tool:
-            found.append(proc)
+        proc_tool = resolved_process_tool(proc, state_cache) if proc else None
+        if proc and proc_tool:
+            found.append(ProcessInfo(pid=proc.pid, ppid=proc.ppid, args=proc.args, tool=proc_tool))
         queue.extend(children.get(pid, []))
     return found
 
@@ -784,6 +808,8 @@ def _session_description(entry: dict[str, Any]) -> str:
 
 
 def summarize_session_changes(previous: list[dict[str, Any]], current: list[dict[str, Any]]) -> list[str]:
+    # Log pane-level save changes so a dropped assistant is visible before the
+    # sidecar is overwritten by the next autosave.
     previous_by_pane = _session_diff_index(previous)
     current_by_pane = _session_diff_index(current)
     messages: list[str] = []
@@ -834,13 +860,12 @@ def save_runtime() -> int:
     panes = parse_pane_snapshot(pane_snapshot)
     processes, children = parse_ps_snapshot(ps_proc.stdout)
     state_cache = state_file_cache()
-    opencode_db = load_opencode_db()
     codex_meta = load_codex_metadata()
     used_codex_ids: set[str] = set()
     sessions: list[dict[str, Any]] = []
 
     for pane in panes.values():
-        candidates = assistant_candidates(pane.pane_pid, processes, children)
+        candidates = assistant_candidates(pane.pane_pid, processes, children, state_cache=state_cache)
         if not candidates:
             continue
 
@@ -848,54 +873,51 @@ def save_runtime() -> int:
         first_pid = candidates[0].pid
         resolved: SessionEntry | None = None
 
-        for allow_opencode_db in (False, True):
-            if resolved is not None:
-                break
-            for process in candidates:
-                if process.tool is None:
-                    continue
-                if allow_opencode_db and process.tool != "opencode":
-                    continue
+        for process in candidates:
+            if process.tool is None:
+                continue
 
-                session_id = ""
-                if process.tool == "claude":
-                    session_id = get_claude_session(process.pid, process.args, state_cache)
-                elif process.tool == "opencode":
-                    session_id = get_opencode_session(
-                        process.pid,
-                        process.args,
-                        pane.cwd,
-                        allow_db=allow_opencode_db,
-                        cache=state_cache,
-                        db_sessions=opencode_db,
-                    )
-                elif process.tool == "codex":
-                    session_id = get_codex_session(
-                        process.pid,
-                        process.args,
-                        pane.cwd,
-                        pane.window_name,
-                        metadata=codex_meta,
-                        used_ids=used_codex_ids,
-                    )
-
-                if not session_id:
-                    continue
-
-                state_data = state_cache.get(str(process.pid), {})
-                env_json = state_data.get("env") if isinstance(state_data, dict) else None
-
-                resolved = SessionEntry(
-                    pane=pane.target,
-                    tool=process.tool,
-                    session_id=session_id,
-                    cwd=pane.cwd,
-                    cli_args=extract_cli_args(process.tool, process.args),
-                    env=env_json,
+            session_id = ""
+            if process.tool == "claude":
+                session_id = get_claude_session(process.pid, process.args, state_cache)
+            elif process.tool == "opencode":
+                # Accuracy beats coverage here. OpenCode's cwd-based DB fallback
+                # can pick the wrong session, so the live save path only trusts
+                # PID-specific plugin state or explicit --session/-s args.
+                session_id = get_opencode_session(
+                    process.pid,
+                    process.args,
+                    pane.cwd,
+                    allow_db=False,
+                    cache=state_cache,
                 )
-                if process.tool == "codex":
-                    used_codex_ids.add(session_id)
-                break
+            elif process.tool == "codex":
+                session_id = get_codex_session(
+                    process.pid,
+                    process.args,
+                    pane.cwd,
+                    pane.window_name,
+                    metadata=codex_meta,
+                    used_ids=used_codex_ids,
+                )
+
+            if not session_id:
+                continue
+
+            state_data = state_cache.get(str(process.pid), {})
+            env_json = state_data.get("env") if isinstance(state_data, dict) else None
+
+            resolved = SessionEntry(
+                pane=pane.target,
+                tool=process.tool,
+                session_id=session_id,
+                cwd=pane.cwd,
+                cli_args=extract_cli_args(process.tool, process.args),
+                env=env_json,
+            )
+            if process.tool == "codex":
+                used_codex_ids.add(session_id)
+            break
 
         if resolved:
             sessions.append(session_entry_to_dict(resolved))
@@ -932,12 +954,15 @@ def restore_runtime() -> int:
     last_children: dict[int, list[int]] = {}
     dispatch_times: dict[str, float] = {}
     dispatch_attempts: dict[str, int] = defaultdict(int)
+    # A restore attempt only counts as success if the assistant survives this
+    # confirmation window instead of appearing briefly and exiting.
     confirmation_since: dict[str, float] = {}
 
     while pending and (time.monotonic() <= deadline or confirmation_since):
         now = time.monotonic()
         pane_snapshot = tmux_capture("#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_command}")
         ps_proc = run_command(["ps", "-eo", "pid=,ppid=,args="])
+        state_cache = state_file_cache()
         last_panes = parse_pane_snapshot(pane_snapshot, include_command=True)
         if ps_proc.returncode == 0:
             last_processes, last_children = parse_ps_snapshot(ps_proc.stdout)
@@ -960,7 +985,12 @@ def restore_runtime() -> int:
                 remaining.append(entry)
                 continue
 
-            existing = pane_assistant_pid(pane_info.pane_pid, last_processes, last_children)
+            existing = pane_assistant_pid(
+                pane_info.pane_pid,
+                last_processes,
+                last_children,
+                state_cache=state_cache,
+            )
             if existing is not None:
                 if pane in dispatch_times:
                     first_seen = confirmation_since.get(pane)
@@ -1024,6 +1054,7 @@ def restore_runtime() -> int:
     if pending:
         pane_snapshot = tmux_capture("#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_command}")
         ps_proc = run_command(["ps", "-eo", "pid=,ppid=,args="])
+        state_cache = state_file_cache()
         panes = parse_pane_snapshot(pane_snapshot, include_command=True)
         processes, children = parse_ps_snapshot(ps_proc.stdout if ps_proc.returncode == 0 else "")
         for entry in pending:
@@ -1046,7 +1077,12 @@ def restore_runtime() -> int:
                 log(log_path, f"pane {pane} is running '{pane_cmd}' (not a shell), skipping")
                 continue
 
-            existing = pane_assistant_pid(pane_info.pane_pid, processes, children)
+            existing = pane_assistant_pid(
+                pane_info.pane_pid,
+                processes,
+                children,
+                state_cache=state_cache,
+            )
             if existing is not None:
                 if pane in dispatch_times:
                     first_seen = confirmation_since.get(pane)
