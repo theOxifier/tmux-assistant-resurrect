@@ -25,7 +25,7 @@ session IDs and restore them automatically.
   `@resurrect-processes`. The post-restore hook handles all resuming with correct
   session IDs. Adding them to `@resurrect-processes` causes double-launch.
 - **TPM-only installation for end users**: Users install via TPM (`set -g @plugin
-  'timvw/tmux-assistant-resurrect'` + `prefix + I`). The `justfile` recipes are
+  'theOxifier/tmux-assistant-resurrect'` + `prefix + I`). The `justfile` recipes are
   for developers only.
 - **Python owns runtime behavior**: Save/restore/session-resolution logic lives
   in `scripts/assistant_resurrect.py`. Do not reintroduce sourced-shell helper APIs.

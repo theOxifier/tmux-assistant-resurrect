@@ -1,17 +1,20 @@
 # tmux-assistant-resurrect
 
-> **Disclaimer**: This project was entirely vibecoded (designed and implemented
-> through conversation with AI coding assistants). It has been end-to-end tested
-> in Docker with real CLI binaries (125 automated tests + full save/kill/restore
-> lifecycle smoke test), but has **limited real-world usage** so far. Expect
-> rough edges. Contributions and bug reports welcome.
+> **Disclaimer**: This project was designed and implemented through iterative
+> work with AI coding assistants. It has Python unit coverage, Docker-based
+> integration coverage with real CLI binaries, and isolated tmux benchmark
+> tooling, but still has limited production usage. Expect rough edges.
 
 Persist and restore AI coding assistant sessions across tmux restarts and reboots.
 
-This repository is a fork of the original `timvw/tmux-assistant-resurrect`, and
-the current implementation has been completely rewritten around a Python runtime
-for save/restore orchestration. The TPM entrypoints and assistant-native hooks
+This repository is a fork of the original
+[`timvw/tmux-assistant-resurrect`](https://github.com/timvw/tmux-assistant-resurrect).
+The current implementation is a substantial rewrite around a Python runtime for
+save/restore orchestration. The TPM entrypoints and assistant-native hooks
 remain, but the shell-heavy save/restore core has been replaced.
+
+This fork remains MIT-licensed and preserves the upstream MIT copyright and
+permission notice. See [License](#license) below.
 
 ![Save, kill, and restore — assistant sessions resume automatically](docs/images/demo-save-restore.gif)
 
@@ -64,6 +67,48 @@ chicken-and-egg problem: after a restore, session IDs are in process args even
 before hooks/plugins have fired. The OpenCode SQLite database fallback provides
 version-resilient session ID extraction even when the plugin hasn't fired.
 
+## Fork direction
+
+This fork is intentionally optimized around a simpler runtime model than the
+original shell-first implementation:
+
+- One Python process owns save/restore logic instead of spreading parsing and
+  fallback logic across shell, `jq`, `sed`, `awk`, and inline Python snippets.
+- Save takes one tmux pane snapshot and one `ps` snapshot, then resolves all
+  assistants in memory.
+- Restore polls for pane readiness instead of relying on fixed sleeps.
+- Restore only counts success after the assistant process remains alive through
+  a confirmation window, which reduces false-positive restores.
+- Save logs pane-level additions, drops, and updates before overwriting the
+  sidecar, which makes missed-session investigations much faster.
+- Test and benchmark tooling use isolated tmux sockets so development commands
+  cannot touch a live tmux server.
+
+The goal is not just fewer dependencies. It is a more deterministic platform
+for debugging save/restore correctness.
+
+## Performance
+
+The biggest runtime improvement from this fork is on the save path. A local
+isolated benchmark on April 9, 2026 compared this fork's Python save runtime
+against upstream commit `6be6d82` (the last shell-based upstream revision in
+this repo history), using mock Claude processes, 5 timed runs per scenario, and
+an isolated tmux socket:
+
+| Scenario | Upstream avg | Fork avg | Speedup | Reduction |
+|----------|-------------:|---------:|--------:|----------:|
+| 116 panes / 40 assistants | 0.169s | 0.139s | 1.22x | 17.8% |
+| 124 panes / 60 assistants | 0.164s | 0.130s | 1.26x | 20.7% |
+| 124 panes / 100 assistants | 0.154s | 0.132s | 1.17x | 14.3% |
+
+Across those scenarios, the measured save-hook average dropped from `0.162s` to
+`0.134s`, or about `17.7%` faster overall.
+
+Those numbers are for the save hook only. Restore improvements are primarily
+about correctness and stability: removing blind sleeps, retrying swallowed
+launches, and requiring durable launch confirmation before counting a pane as
+restored.
+
 ## Prerequisites
 
 - [tmux](https://github.com/tmux/tmux) (tested with 3.x)
@@ -85,7 +130,7 @@ Add to your `~/.tmux.conf`:
 set -g @plugin 'tmux-plugins/tpm'
 set -g @plugin 'tmux-plugins/tmux-resurrect'
 set -g @plugin 'tmux-plugins/tmux-continuum'
-set -g @plugin 'timvw/tmux-assistant-resurrect'
+set -g @plugin 'theOxifier/tmux-assistant-resurrect'
 
 # Optional: restore terminal text in non-assistant panes after tmux restart.
 # If enabled, the plugin automatically strips captured content for assistant
@@ -105,7 +150,7 @@ and automatically set up:
 
 ## Uninstallation
 
-Remove the `@plugin 'timvw/tmux-assistant-resurrect'` line from `~/.tmux.conf`,
+Remove the `@plugin 'theOxifier/tmux-assistant-resurrect'` line from `~/.tmux.conf`,
 then press `prefix + alt + u` inside tmux.
 
 ## Usage
@@ -486,4 +531,11 @@ commands.
 
 ## License
 
-MIT
+This fork remains under the MIT License.
+
+- Original project: `timvw/tmux-assistant-resurrect`
+- Upstream copyright notice and permission notice are preserved in `LICENSE`
+- New modifications in this fork are distributed under the same MIT terms
+
+That means you can use, modify, and redistribute this fork, but the MIT notice
+must stay with copies or substantial portions of the software.
