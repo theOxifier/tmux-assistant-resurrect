@@ -1,3 +1,4 @@
 .DS_Store
 demo/output/
 test-results/
+**/__pycache__/**
