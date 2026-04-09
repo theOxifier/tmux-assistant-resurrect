@@ -1935,6 +1935,92 @@ rm -f "$TMUX_PROXY_DROP_STATE"
 unset TMUX_ASSISTANT_TMUX_BIN
 unset TMUX_PROXY_DROP_STATE
 
+echo ""
+echo "=== Test 12: transient assistant launch must not count as restored ==="
+echo ""
+
+TRANSIENT_BIN_DIR=$(mktemp -d)
+TRANSIENT_CLAUDE_STATE=$(mktemp)
+cat >"$TRANSIENT_BIN_DIR/claude" <<'TRANSIENTCLAUDE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_file="${TRANSIENT_CLAUDE_STATE:?}"
+count=0
+if [ -f "$state_file" ]; then
+	count=$(cat "$state_file")
+fi
+count=$((count + 1))
+printf '%s\n' "$count" >"$state_file"
+
+if [ "$count" -eq 1 ]; then
+	sleep 0.20
+	exit 1
+fi
+
+sleep 15
+TRANSIENTCLAUDE
+chmod +x "$TRANSIENT_BIN_DIR/claude"
+
+OLD_PATH="$PATH"
+export PATH="$TRANSIENT_BIN_DIR:$PATH"
+tmux set-environment -g PATH "$PATH"
+tmux set-environment -g TRANSIENT_CLAUDE_STATE "$TRANSIENT_CLAUDE_STATE"
+
+tmux new-session -d -s test-restore-confirm -c /tmp 2>/dev/null || true
+sleep 0.2
+
+confirm_shell=$(tmux display-message -t test-restore-confirm:0.0 -p '#{pane_pid}')
+
+cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RCONFIRM'
+{
+  "timestamp": "2026-01-01T00:00:00Z",
+  "sessions": [
+    {
+      "pane": "test-restore-confirm:0.0",
+      "tool": "claude",
+      "session_id": "ses_confirmed_after_dwell",
+      "cwd": "/tmp"
+    }
+  ]
+}
+RCONFIRM
+
+>"$RESTORE_LOG"
+export TRANSIENT_CLAUDE_STATE
+export TMUX_ASSISTANT_RESTORE_POLL_INTERVAL_SECONDS="0.05"
+export TMUX_ASSISTANT_RESTORE_RETRY_INTERVAL_SECONDS="0.20"
+export TMUX_ASSISTANT_RESTORE_CONFIRMATION_SECONDS="0.40"
+export TMUX_ASSISTANT_RESTORE_TIMEOUT_SECONDS="5"
+just restore 2>&1
+
+confirm_pid=$(wait_for_descendant "$confirm_shell" 10) || confirm_pid=""
+if [ -n "$confirm_pid" ]; then
+	pass "Confirmation restore: assistant relaunched after transient failure"
+else
+	fail "Confirmation restore: assistant did not relaunch after transient failure"
+fi
+
+confirm_attempts=$(cat "$TRANSIENT_CLAUDE_STATE" 2>/dev/null || echo 0)
+assert_eq "Confirmation restore retried after transient launch" "2" "$confirm_attempts"
+
+confirm_log=$(cat "$RESTORE_LOG")
+assert_contains "Confirmation restore log records retry" "$confirm_log" "retrying claude in test-restore-confirm:0.0"
+assert_contains "Confirmation restore log confirms pane" "$confirm_log" "confirmed claude running in test-restore-confirm:0.0 after restore attempt"
+assert_contains "Confirmation restore log reports success" "$confirm_log" "restored 1 of 1 assistant session(s)"
+
+kill_pane_children test-restore-confirm true
+tmux set-environment -g PATH "$OLD_PATH"
+tmux set-environment -gu TRANSIENT_CLAUDE_STATE
+export PATH="$OLD_PATH"
+rm -rf "$TRANSIENT_BIN_DIR"
+rm -f "$TRANSIENT_CLAUDE_STATE"
+unset TRANSIENT_CLAUDE_STATE
+unset TMUX_ASSISTANT_RESTORE_POLL_INTERVAL_SECONDS
+unset TMUX_ASSISTANT_RESTORE_RETRY_INTERVAL_SECONDS
+unset TMUX_ASSISTANT_RESTORE_CONFIRMATION_SECONDS
+unset TMUX_ASSISTANT_RESTORE_TIMEOUT_SECONDS
+
 # --- Summary ---
 
 echo ""

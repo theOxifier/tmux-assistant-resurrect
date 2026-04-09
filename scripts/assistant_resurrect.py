@@ -32,6 +32,7 @@ SHELL_WHITELIST = {"bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "csh", "n
 RESTORE_TIMEOUT_SECONDS = float(os.environ.get("TMUX_ASSISTANT_RESTORE_TIMEOUT_SECONDS", "10.0"))
 RESTORE_POLL_INTERVAL_SECONDS = float(os.environ.get("TMUX_ASSISTANT_RESTORE_POLL_INTERVAL_SECONDS", "0.1"))
 RESTORE_RETRY_INTERVAL_SECONDS = float(os.environ.get("TMUX_ASSISTANT_RESTORE_RETRY_INTERVAL_SECONDS", "1.5"))
+RESTORE_CONFIRMATION_SECONDS = float(os.environ.get("TMUX_ASSISTANT_RESTORE_CONFIRMATION_SECONDS", "0.75"))
 
 
 @dataclass
@@ -763,12 +764,66 @@ def session_entry_to_dict(entry: SessionEntry) -> dict[str, Any]:
     }
 
 
+def _session_diff_index(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        pane = entry.get("pane")
+        if isinstance(pane, str) and pane:
+            indexed[pane] = entry
+    return indexed
+
+
+def _session_description(entry: dict[str, Any]) -> str:
+    tool = entry.get("tool") if isinstance(entry.get("tool"), str) else "unknown"
+    session_id = entry.get("session_id") if isinstance(entry.get("session_id"), str) else "unknown"
+    cwd = entry.get("cwd") if isinstance(entry.get("cwd"), str) and entry.get("cwd") else ""
+    description = f"{tool} {session_id}"
+    if cwd:
+        description += f" cwd {cwd}"
+    return description
+
+
+def summarize_session_changes(previous: list[dict[str, Any]], current: list[dict[str, Any]]) -> list[str]:
+    previous_by_pane = _session_diff_index(previous)
+    current_by_pane = _session_diff_index(current)
+    messages: list[str] = []
+
+    for pane in sorted(current_by_pane.keys() - previous_by_pane.keys()):
+        messages.append(f"added pane {pane} ({_session_description(current_by_pane[pane])})")
+
+    for pane in sorted(previous_by_pane.keys() - current_by_pane.keys()):
+        messages.append(f"dropped pane {pane} ({_session_description(previous_by_pane[pane])})")
+
+    for pane in sorted(previous_by_pane.keys() & current_by_pane.keys()):
+        before = previous_by_pane[pane]
+        after = current_by_pane[pane]
+        before_fingerprint = (
+            before.get("tool"),
+            before.get("session_id"),
+            before.get("cwd"),
+            before.get("cli_args"),
+        )
+        after_fingerprint = (
+            after.get("tool"),
+            after.get("session_id"),
+            after.get("cwd"),
+            after.get("cli_args"),
+        )
+        if before_fingerprint != after_fingerprint:
+            messages.append(
+                f"updated pane {pane} ({_session_description(before)} -> {_session_description(after)})"
+            )
+
+    return messages
+
+
 def save_runtime() -> int:
     log_path = save_log_file()
     rotate_log(log_path)
     output_path = output_file()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     state_dir().mkdir(parents=True, exist_ok=True, mode=0o700)
+    previous_sessions, _ = read_saved_sessions()
 
     ps_proc = run_command(["ps", "-eo", "pid=,ppid=,args="])
     if ps_proc.returncode != 0 or not ps_proc.stdout.strip():
@@ -853,6 +908,8 @@ def save_runtime() -> int:
     }
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     log(log_path, f"saved {len(sessions)} assistant session(s) to {output_path}")
+    for message in summarize_session_changes(previous_sessions, sessions):
+        log(log_path, message)
     if sessions:
         strip_assistant_pane_contents_runtime(sessions=sessions, output_path=output_path, log_path=log_path)
     return 0
@@ -875,8 +932,9 @@ def restore_runtime() -> int:
     last_children: dict[int, list[int]] = {}
     dispatch_times: dict[str, float] = {}
     dispatch_attempts: dict[str, int] = defaultdict(int)
+    confirmation_since: dict[str, float] = {}
 
-    while pending and time.monotonic() <= deadline:
+    while pending and (time.monotonic() <= deadline or confirmation_since):
         now = time.monotonic()
         pane_snapshot = tmux_capture("#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_command}")
         ps_proc = run_command(["ps", "-eo", "pid=,ppid=,args="])
@@ -905,15 +963,23 @@ def restore_runtime() -> int:
             existing = pane_assistant_pid(pane_info.pane_pid, last_processes, last_children)
             if existing is not None:
                 if pane in dispatch_times:
-                    restored += 1
-                    progress = True
-                    log(log_path, f"confirmed {tool} running in {pane} after restore attempt")
-                    dispatch_times.pop(pane, None)
-                    dispatch_attempts.pop(pane, None)
-                    continue
+                    first_seen = confirmation_since.get(pane)
+                    if first_seen is None:
+                        confirmation_since[pane] = now
+                        remaining.append(entry)
+                        continue
+                    if (now - first_seen) >= RESTORE_CONFIRMATION_SECONDS:
+                        restored += 1
+                        progress = True
+                        log(log_path, f"confirmed {tool} running in {pane} after restore attempt")
+                        dispatch_times.pop(pane, None)
+                        dispatch_attempts.pop(pane, None)
+                        confirmation_since.pop(pane, None)
+                        continue
                 remaining.append(entry)
                 continue
 
+            confirmation_since.pop(pane, None)
             pane_cmd = pane_info.current_command.lstrip("-")
             if pane_cmd not in SHELL_WHITELIST:
                 remaining.append(entry)
@@ -941,6 +1007,7 @@ def restore_runtime() -> int:
             run_tmux(["send-keys", "-t", pane, full_cmd, "Enter"], capture_output=True)
             dispatch_attempts[pane] = attempt
             dispatch_times[pane] = now
+            confirmation_since.pop(pane, None)
             if attempt == 1:
                 log(log_path, f"restoring {tool} in {pane} (session: {session_id}, cmd: {resume_cmd})")
             else:
@@ -982,8 +1049,16 @@ def restore_runtime() -> int:
             existing = pane_assistant_pid(pane_info.pane_pid, processes, children)
             if existing is not None:
                 if pane in dispatch_times:
-                    restored += 1
-                    log(log_path, f"confirmed {tool} running in {pane} after restore attempt")
+                    first_seen = confirmation_since.get(pane)
+                    if first_seen is not None and (time.monotonic() - first_seen) >= RESTORE_CONFIRMATION_SECONDS:
+                        restored += 1
+                        log(log_path, f"confirmed {tool} running in {pane} after restore attempt")
+                    else:
+                        attempts = dispatch_attempts.get(pane, 0)
+                        log(
+                            log_path,
+                            f"pane {pane} launched {tool} but did not remain running for the confirmation window after {attempts} restore attempt(s), skipping",
+                        )
                 else:
                     log(log_path, f"pane {pane} already has a running assistant (pid {existing}), skipping")
                 continue

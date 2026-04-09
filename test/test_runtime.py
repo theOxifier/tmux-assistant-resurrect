@@ -307,5 +307,52 @@ class StripPaneContentsTests(TempEnvMixin, unittest.TestCase):
         self.assertTrue((extract_dir / "pane_contents" / "pane-regular-session:0.0").exists())
 
 
+class SessionDiffTests(unittest.TestCase):
+    def test_summarize_session_changes_reports_added_dropped_and_updated_panes(self) -> None:
+        previous = [
+            {
+                "pane": "codex:1.1",
+                "tool": "codex",
+                "session_id": "ses_old",
+                "cwd": "/tmp/old",
+                "cli_args": "",
+            },
+            {
+                "pane": "codex:2.1",
+                "tool": "codex",
+                "session_id": "ses_drop",
+                "cwd": "/tmp/drop",
+                "cli_args": "",
+            },
+        ]
+        current = [
+            {
+                "pane": "codex:1.1",
+                "tool": "codex",
+                "session_id": "ses_new",
+                "cwd": "/tmp/new",
+                "cli_args": "--full-auto",
+            },
+            {
+                "pane": "codex:3.1",
+                "tool": "codex",
+                "session_id": "ses_add",
+                "cwd": "/tmp/add",
+                "cli_args": "",
+            },
+        ]
+
+        changes = runtime.summarize_session_changes(previous, current)
+
+        self.assertEqual(
+            changes,
+            [
+                "added pane codex:3.1 (codex ses_add cwd /tmp/add)",
+                "dropped pane codex:2.1 (codex ses_drop cwd /tmp/drop)",
+                "updated pane codex:1.1 (codex ses_old cwd /tmp/old -> codex ses_new cwd /tmp/new)",
+            ],
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
