@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -158,8 +159,28 @@ class ClaudeSessionTests(TempEnvMixin, unittest.TestCase):
             encoding="utf-8",
         )
         self.assertEqual(
-            runtime.get_claude_session(22222, "claude", pane_id="%5"),
+            runtime.get_claude_session(22222, "claude", pane_id="%5", live_pids={11111, 22222}),
             "ses_from_pane",
+        )
+
+    def test_pane_state_fallback_rejects_stale_process(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "claude-11111.json").write_text(
+            json.dumps(
+                {
+                    "tool": "claude",
+                    "session_id": "ses_stale",
+                    "ppid": 11111,
+                    "timestamp": "2026-04-09T16:14:38Z",
+                    "env": {"tmux_pane": "%5"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            runtime.get_claude_session(22222, "claude", pane_id="%5", live_pids={22222}),
+            "",
         )
 
 
@@ -184,8 +205,28 @@ class OpenCodeSessionTests(TempEnvMixin, unittest.TestCase):
             encoding="utf-8",
         )
         self.assertEqual(
-            runtime.get_opencode_session(22222, "opencode", "/tmp", allow_db=False, pane_id="%4"),
+            runtime.get_opencode_session(22222, "opencode", "/tmp", allow_db=False, pane_id="%4", live_pids={11111, 22222}),
             "ses_from_pane",
+        )
+
+    def test_pane_state_fallback_rejects_stale_process(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "opencode-11111.json").write_text(
+            json.dumps(
+                {
+                    "tool": "opencode",
+                    "session_id": "ses_stale",
+                    "pid": 11111,
+                    "timestamp": "2026-04-09T16:14:38Z",
+                    "env": {"tmux_pane": "%4"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            runtime.get_opencode_session(22222, "opencode", "/tmp", allow_db=False, pane_id="%4", live_pids={22222}),
+            "",
         )
 
     def test_db_fallback(self) -> None:
@@ -405,6 +446,74 @@ class StripPaneContentsTests(TempEnvMixin, unittest.TestCase):
             archive.extractall(extract_dir)
         self.assertFalse((extract_dir / "pane_contents" / "pane-assistant-session:0.0").exists())
         self.assertTrue((extract_dir / "pane_contents" / "pane-regular-session:0.0").exists())
+
+
+class SaveRuntimeTests(TempEnvMixin, unittest.TestCase):
+    def test_save_runtime_preserves_env_from_pane_fallback(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self.home / "assistant-sessions.json"
+        os.environ["OUTPUT_FILE"] = str(output_path)
+        (self.state_dir / "opencode-33333.json").write_text(
+            json.dumps(
+                {
+                    "tool": "opencode",
+                    "session_id": "ses_from_pane",
+                    "pid": 33333,
+                    "timestamp": "2026-04-09T16:14:38Z",
+                    "env": {"tmux_pane": "%4", "OPENCODE_DEBUG": "1"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        original_run_command = runtime.run_command
+        original_tmux_capture = runtime.tmux_capture
+        original_strip = runtime.strip_assistant_pane_contents_runtime
+
+        def fake_run_command(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            if argv == ["ps", "-eo", "pid=,ppid=,args="]:
+                stdout = "\n".join(
+                    [
+                        "100 1 -zsh",
+                        "22222 100 opencode --profile test",
+                        "33333 22222 node plugin-host.js",
+                    ]
+                )
+                return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+            raise AssertionError(f"unexpected command: {argv}")
+
+        def fake_tmux_capture(format_str: str) -> str:
+            self.assertEqual(
+                format_str,
+                "#{session_name}:#{window_index}.#{pane_index}|#{pane_id}|#{pane_pid}|#{pane_current_path}|#{window_name}",
+            )
+            return "work:0.0|%4|100|/tmp/project|project\n"
+
+        runtime.run_command = fake_run_command
+        runtime.tmux_capture = fake_tmux_capture
+        runtime.strip_assistant_pane_contents_runtime = lambda **_: 0
+        try:
+            self.assertEqual(runtime.save_runtime(), 0)
+        finally:
+            runtime.run_command = original_run_command
+            runtime.tmux_capture = original_tmux_capture
+            runtime.strip_assistant_pane_contents_runtime = original_strip
+
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload["sessions"],
+            [
+                {
+                    "pane": "work:0.0",
+                    "tool": "opencode",
+                    "session_id": "ses_from_pane",
+                    "cwd": "/tmp/project",
+                    "cli_args": "--profile test",
+                    "env": {"tmux_pane": "%4", "OPENCODE_DEBUG": "1"},
+                }
+            ],
+        )
 
 
 class SessionDiffTests(unittest.TestCase):

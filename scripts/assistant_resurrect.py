@@ -308,6 +308,20 @@ def assistant_candidates(
     return found
 
 
+def process_tree_pids(root_pid: int, children: dict[int, list[int]]) -> set[int]:
+    if root_pid <= 1:
+        return set()
+    seen: set[int] = set()
+    queue: deque[int] = deque([root_pid])
+    while queue:
+        pid = queue.popleft()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        queue.extend(children.get(pid, []))
+    return seen
+
+
 def read_json_file(path: Path) -> Any | None:
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -369,13 +383,31 @@ def state_file_cache() -> dict[str, dict[str, Any]]:
             data = dict(data)
         pid = path.stem.split("-", 1)[1] if "-" in path.stem else ""
         if pid:
+            data["__state_pid"] = normalize_int(pid)
             cache[pid] = data
     return cache
 
 
-def session_id_from_pane_state(tool: str, pane_id: str, cache: dict[str, dict[str, Any]]) -> str:
-    if not pane_id:
+def state_session_id(data: dict[str, Any] | None) -> str:
+    if not isinstance(data, dict):
         return ""
+    session_id = data.get("session_id")
+    return session_id if isinstance(session_id, str) else ""
+
+
+def session_state_from_pid(child_pid: int, cache: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    data = cache.get(str(child_pid))
+    return data if state_session_id(data) else None
+
+
+def session_state_from_pane_state(
+    tool: str,
+    pane_id: str,
+    cache: dict[str, dict[str, Any]],
+    live_pids: set[int] | None = None,
+) -> dict[str, Any] | None:
+    if not pane_id or not live_pids:
+        return None
 
     matches: list[dict[str, Any]] = []
     for data in cache.values():
@@ -384,12 +416,19 @@ def session_id_from_pane_state(tool: str, pane_id: str, cache: dict[str, dict[st
         env = data.get("env")
         if not isinstance(env, dict) or env.get("tmux_pane") != pane_id:
             continue
-        session_id = data.get("session_id")
-        if isinstance(session_id, str) and session_id:
-            matches.append(data)
+        if not state_session_id(data):
+            continue
+        state_pids = {
+            normalize_int(data.get("__state_pid")),
+            normalize_int(data.get("pid")),
+            normalize_int(data.get("ppid")),
+        }
+        if not any(pid in live_pids for pid in state_pids if pid > 1):
+            continue
+        matches.append(data)
 
     if not matches:
-        return ""
+        return None
 
     def score(data: dict[str, Any]) -> tuple[float, float]:
         return (
@@ -397,9 +436,26 @@ def session_id_from_pane_state(tool: str, pane_id: str, cache: dict[str, dict[st
             float(data.get("__mtime") or 0.0),
         )
 
-    best = max(matches, key=score)
-    session_id = best.get("session_id")
-    return session_id if isinstance(session_id, str) else ""
+    return max(matches, key=score)
+
+
+def matching_session_state(
+    tool: str,
+    child_pid: int,
+    pane_id: str,
+    session_id: str,
+    cache: dict[str, dict[str, Any]],
+    live_pids: set[int] | None = None,
+) -> dict[str, Any] | None:
+    if not session_id:
+        return None
+    data = session_state_from_pid(child_pid, cache)
+    if state_session_id(data) == session_id:
+        return data
+    data = session_state_from_pane_state(tool, pane_id, cache, live_pids)
+    if state_session_id(data) == session_id:
+        return data
+    return None
 
 
 def read_etimes(pid: int) -> int | None:
@@ -560,20 +616,19 @@ def get_claude_session(
     args: str,
     cache: dict[str, dict[str, Any]] | None = None,
     pane_id: str = "",
+    live_pids: set[int] | None = None,
     known_project_sessions: set[str] | None = None,
 ) -> str:
     cache = cache or state_file_cache()
-    data = cache.get(str(child_pid))
-    if isinstance(data, dict):
-        session_id = data.get("session_id")
-        if isinstance(session_id, str) and session_id:
-            return session_id
+    data = session_state_from_pid(child_pid, cache)
+    if data:
+        return state_session_id(data)
     file_session_id = read_claude_session_file(child_pid, known_project_sessions)
     if file_session_id:
         return file_session_id
-    pane_session_id = session_id_from_pane_state("claude", pane_id, cache)
-    if pane_session_id:
-        return pane_session_id
+    data = session_state_from_pane_state("claude", pane_id, cache, live_pids)
+    if data:
+        return state_session_id(data)
     match = re.search(r"--resume(?:=|\s+)(\S+)", args)
     return match.group(1) if match else ""
 
@@ -586,17 +641,16 @@ def get_opencode_session(
     cache: dict[str, dict[str, Any]] | None = None,
     db_sessions: dict[str, list[str]] | None = None,
     pane_id: str = "",
+    live_pids: set[int] | None = None,
 ) -> str:
     cache = cache or state_file_cache()
-    data = cache.get(str(child_pid))
-    if isinstance(data, dict):
-        session_id = data.get("session_id")
-        if isinstance(session_id, str) and session_id:
-            return session_id
+    data = session_state_from_pid(child_pid, cache)
+    if data:
+        return state_session_id(data)
 
-    pane_session_id = session_id_from_pane_state("opencode", pane_id, cache)
-    if pane_session_id:
-        return pane_session_id
+    data = session_state_from_pane_state("opencode", pane_id, cache, live_pids)
+    if data:
+        return state_session_id(data)
 
     match = re.search(r"--session(?:=|\s+)(\S+)", args)
     if match:
@@ -949,6 +1003,7 @@ def save_runtime() -> int:
         if not candidates:
             continue
 
+        pane_live_pids = process_tree_pids(pane.pane_pid, children)
         first_tool = candidates[0].tool or ""
         first_pid = candidates[0].pid
         resolved: SessionEntry | None = None
@@ -964,6 +1019,7 @@ def save_runtime() -> int:
                     process.args,
                     state_cache,
                     pane.pane_id,
+                    pane_live_pids,
                     claude_project_sessions,
                 )
             elif process.tool == "opencode":
@@ -977,6 +1033,7 @@ def save_runtime() -> int:
                     allow_db=False,
                     cache=state_cache,
                     pane_id=pane.pane_id,
+                    live_pids=pane_live_pids,
                 )
             elif process.tool == "codex":
                 session_id = get_codex_session(
@@ -991,7 +1048,14 @@ def save_runtime() -> int:
             if not session_id:
                 continue
 
-            state_data = state_cache.get(str(process.pid), {})
+            state_data = matching_session_state(
+                process.tool,
+                process.pid,
+                pane.pane_id,
+                session_id,
+                state_cache,
+                pane_live_pids,
+            )
             env_json = state_data.get("env") if isinstance(state_data, dict) else None
 
             resolved = SessionEntry(
