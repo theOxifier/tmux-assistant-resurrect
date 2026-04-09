@@ -33,12 +33,18 @@ to address the chicken-and-egg problem (session IDs may be in process args
 before hooks/plugins have fired):
 
 - **Claude Code**: `SessionStart` hook state file keyed by Claude's PID
-  (primary); `--resume <id>` in process args (fallback -- note: Claude
-  overwrites its process title, so this only works if args are still visible)
+  (primary); `~/.claude/sessions/<pid>.json` only when its `sessionId` also
+  exists as a durable project transcript under `~/.claude/projects`
+  (secondary); same-pane state file fallback via captured `TMUX_PANE` when the
+  hook wrote a valid state file but the Claude PID changed inside that pane;
+  `--resume <id>` in process args (last fallback -- note: Claude overwrites its
+  process title, so this only works if args are still visible)
 - **OpenCode**: plugin state file keyed by the OpenCode PID (primary for live
-  saves); `-s` / `--session` in process args (fallback when the state file is
-  not available). The live save path intentionally does not trust cwd-based DB
-  lookups, because accuracy matters more than recovering an ambiguous session.
+  saves); same-pane state file fallback via captured `TMUX_PANE` when the
+  plugin state is valid but the visible PID changed inside the pane; `-s` /
+  `--session` in process args (fallback when the state file is not available).
+  The live save path intentionally does not trust cwd-based DB lookups, because
+  accuracy matters more than recovering an ambiguous session.
 - **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl` (primary when
   available); explicit UUID / named-thread / rollout / SQLite evidence
   (ordered fallback chain); `resume <id>` in process args (last resort)

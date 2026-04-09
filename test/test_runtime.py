@@ -115,11 +115,78 @@ class ClaudeSessionTests(TempEnvMixin, unittest.TestCase):
             "ses_fallback",
         )
 
+    def test_claude_pid_session_file_fallback_requires_matching_project_transcript(self) -> None:
+        session_dir = self.home / ".claude" / "sessions"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        project_dir = self.home / ".claude" / "projects" / "-tmp"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        (project_dir / "ses_from_pid_file.jsonl").write_text("{}\n", encoding="utf-8")
+        (session_dir / "12345.json").write_text(
+            json.dumps({"pid": 12345, "sessionId": "ses_from_pid_file", "cwd": "/tmp"}) + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            runtime.get_claude_session(12345, "claude"),
+            "ses_from_pid_file",
+        )
+
+    def test_claude_pid_session_file_ignores_non_project_session(self) -> None:
+        session_dir = self.home / ".claude" / "sessions"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "12345.json").write_text(
+            json.dumps({"pid": 12345, "sessionId": "ses_ephemeral_only", "cwd": "/tmp"}) + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            runtime.get_claude_session(12345, "claude"),
+            "",
+        )
+
+    def test_pane_state_fallback(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "claude-11111.json").write_text(
+            json.dumps(
+                {
+                    "tool": "claude",
+                    "session_id": "ses_from_pane",
+                    "ppid": 11111,
+                    "timestamp": "2026-04-09T16:14:38Z",
+                    "env": {"tmux_pane": "%5"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            runtime.get_claude_session(22222, "claude", pane_id="%5"),
+            "ses_from_pane",
+        )
+
 
 class OpenCodeSessionTests(TempEnvMixin, unittest.TestCase):
     def test_arg_extraction(self) -> None:
         self.assertEqual(runtime.get_opencode_session(99999, "opencode -s ses_oc_456", "/tmp"), "ses_oc_456")
         self.assertEqual(runtime.get_opencode_session(99999, "opencode --session=ses_oc_789", "/tmp"), "ses_oc_789")
+
+    def test_pane_state_fallback(self) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.state_dir / "opencode-11111.json").write_text(
+            json.dumps(
+                {
+                    "tool": "opencode",
+                    "session_id": "ses_from_pane",
+                    "pid": 11111,
+                    "timestamp": "2026-04-09T16:14:38Z",
+                    "env": {"tmux_pane": "%4"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            runtime.get_opencode_session(22222, "opencode", "/tmp", allow_db=False, pane_id="%4"),
+            "ses_from_pane",
+        )
 
     def test_db_fallback(self) -> None:
         db_dir = self.home / ".local" / "share" / "opencode"

@@ -22,7 +22,7 @@ import tempfile
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +47,7 @@ class ProcessInfo:
 class PaneInfo:
     target: str
     pane_pid: int
+    pane_id: str = ""
     cwd: str = ""
     window_name: str = ""
     current_command: str = ""
@@ -114,7 +115,7 @@ def rotate_log(path: Path) -> None:
 
 
 def log(path: Path, message: str) -> None:
-    timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     line = f"[{timestamp}] {message}"
     print(line, file=sys.stderr)
     try:
@@ -238,14 +239,14 @@ def parse_pane_snapshot(snapshot: str, *, include_command: bool = False) -> dict
                 continue
             panes[target] = PaneInfo(target=target, pane_pid=pane_pid, current_command=current_command)
         else:
-            if len(parts) < 4:
+            if len(parts) < 5:
                 continue
-            target, pane_pid_raw, cwd, window_name = parts[:4]
+            target, pane_id, pane_pid_raw, cwd, window_name = parts[:5]
             try:
                 pane_pid = int(pane_pid_raw)
             except ValueError:
                 continue
-            panes[target] = PaneInfo(target=target, pane_pid=pane_pid, cwd=cwd, window_name=window_name)
+            panes[target] = PaneInfo(target=target, pane_pid=pane_pid, pane_id=pane_id, cwd=cwd, window_name=window_name)
     return panes
 
 
@@ -361,10 +362,44 @@ def state_file_cache() -> dict[str, dict[str, Any]]:
         data = read_json_file(path)
         if not isinstance(data, dict):
             continue
+        try:
+            data = dict(data)
+            data["__mtime"] = path.stat().st_mtime
+        except OSError:
+            data = dict(data)
         pid = path.stem.split("-", 1)[1] if "-" in path.stem else ""
         if pid:
             cache[pid] = data
     return cache
+
+
+def session_id_from_pane_state(tool: str, pane_id: str, cache: dict[str, dict[str, Any]]) -> str:
+    if not pane_id:
+        return ""
+
+    matches: list[dict[str, Any]] = []
+    for data in cache.values():
+        if not isinstance(data, dict) or data.get("tool") != tool:
+            continue
+        env = data.get("env")
+        if not isinstance(env, dict) or env.get("tmux_pane") != pane_id:
+            continue
+        session_id = data.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            matches.append(data)
+
+    if not matches:
+        return ""
+
+    def score(data: dict[str, Any]) -> tuple[float, float]:
+        return (
+            parse_timestamp(data.get("timestamp")) or 0.0,
+            float(data.get("__mtime") or 0.0),
+        )
+
+    best = max(matches, key=score)
+    session_id = best.get("session_id")
+    return session_id if isinstance(session_id, str) else ""
 
 
 def read_etimes(pid: int) -> int | None:
@@ -493,13 +528,52 @@ def normalize_int(value: Any) -> int:
         return 0
 
 
-def get_claude_session(child_pid: int, args: str, cache: dict[str, dict[str, Any]] | None = None) -> str:
+def load_claude_project_session_ids() -> set[str]:
+    projects_root = Path.home() / ".claude" / "projects"
+    session_ids: set[str] = set()
+    if not projects_root.exists():
+        return session_ids
+    for path in projects_root.glob("*/*.jsonl"):
+        session_id = path.stem
+        if session_id:
+            session_ids.add(session_id)
+    return session_ids
+
+
+def read_claude_session_file(child_pid: int, known_project_sessions: set[str] | None = None) -> str:
+    path = Path.home() / ".claude" / "sessions" / f"{child_pid}.json"
+    data = read_json_file(path)
+    if not isinstance(data, dict):
+        return ""
+    for key in ("sessionId", "session_id"):
+        session_id = data.get(key)
+        if isinstance(session_id, str) and session_id:
+            if known_project_sessions is None:
+                known_project_sessions = load_claude_project_session_ids()
+            if session_id in known_project_sessions:
+                return session_id
+    return ""
+
+
+def get_claude_session(
+    child_pid: int,
+    args: str,
+    cache: dict[str, dict[str, Any]] | None = None,
+    pane_id: str = "",
+    known_project_sessions: set[str] | None = None,
+) -> str:
     cache = cache or state_file_cache()
     data = cache.get(str(child_pid))
     if isinstance(data, dict):
         session_id = data.get("session_id")
         if isinstance(session_id, str) and session_id:
             return session_id
+    file_session_id = read_claude_session_file(child_pid, known_project_sessions)
+    if file_session_id:
+        return file_session_id
+    pane_session_id = session_id_from_pane_state("claude", pane_id, cache)
+    if pane_session_id:
+        return pane_session_id
     match = re.search(r"--resume(?:=|\s+)(\S+)", args)
     return match.group(1) if match else ""
 
@@ -511,6 +585,7 @@ def get_opencode_session(
     allow_db: bool = True,
     cache: dict[str, dict[str, Any]] | None = None,
     db_sessions: dict[str, list[str]] | None = None,
+    pane_id: str = "",
 ) -> str:
     cache = cache or state_file_cache()
     data = cache.get(str(child_pid))
@@ -518,6 +593,10 @@ def get_opencode_session(
         session_id = data.get("session_id")
         if isinstance(session_id, str) and session_id:
             return session_id
+
+    pane_session_id = session_id_from_pane_state("opencode", pane_id, cache)
+    if pane_session_id:
+        return pane_session_id
 
     match = re.search(r"--session(?:=|\s+)(\S+)", args)
     if match:
@@ -856,10 +935,11 @@ def save_runtime() -> int:
         log(log_path, "ps snapshot failed or empty, skipping save")
         return 1
 
-    pane_snapshot = tmux_capture("#{session_name}:#{window_index}.#{pane_index}|#{pane_pid}|#{pane_current_path}|#{window_name}")
+    pane_snapshot = tmux_capture("#{session_name}:#{window_index}.#{pane_index}|#{pane_id}|#{pane_pid}|#{pane_current_path}|#{window_name}")
     panes = parse_pane_snapshot(pane_snapshot)
     processes, children = parse_ps_snapshot(ps_proc.stdout)
     state_cache = state_file_cache()
+    claude_project_sessions = load_claude_project_session_ids()
     codex_meta = load_codex_metadata()
     used_codex_ids: set[str] = set()
     sessions: list[dict[str, Any]] = []
@@ -879,7 +959,13 @@ def save_runtime() -> int:
 
             session_id = ""
             if process.tool == "claude":
-                session_id = get_claude_session(process.pid, process.args, state_cache)
+                session_id = get_claude_session(
+                    process.pid,
+                    process.args,
+                    state_cache,
+                    pane.pane_id,
+                    claude_project_sessions,
+                )
             elif process.tool == "opencode":
                 # Accuracy beats coverage here. OpenCode's cwd-based DB fallback
                 # can pick the wrong session, so the live save path only trusts
@@ -890,6 +976,7 @@ def save_runtime() -> int:
                     pane.cwd,
                     allow_db=False,
                     cache=state_cache,
+                    pane_id=pane.pane_id,
                 )
             elif process.tool == "codex":
                 session_id = get_codex_session(
@@ -925,7 +1012,7 @@ def save_runtime() -> int:
             log(log_path, f"detected {first_tool} in {pane.target} (pid {first_pid}) but no session ID available")
 
     payload = {
-        "timestamp": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "sessions": sessions,
     }
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -1125,7 +1212,7 @@ def claude_hook_start_runtime(claude_pid: int) -> int:
     state = dict(payload)
     state["tool"] = "claude"
     state["ppid"] = claude_pid
-    state["timestamp"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     state["env"] = build_captured_env()
 
     directory = state_dir()
