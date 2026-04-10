@@ -57,12 +57,12 @@ Agent detection uses direct process inspection: the save script takes a single
 shells against known assistant binary names via `detect_tool()` in
 `scripts/assistant_resurrect.py`.
 
-Session ID extraction uses tool-native mechanisms (state files, process args,
-JSONL lookup, SQLite database) -- this is infrastructure plumbing, not heuristic
-classification. Both Claude and OpenCode overwrite their process titles, but
-on macOS arm64 (v2.1.44+) process args are still visible via `ps -eo args=`.
-State files and database queries remain the primary extraction methods, with
-process args as a reliable fallback.
+Session ID extraction uses explicit tool-native mechanisms: Claude/OpenCode
+state files, process args, and Codex JSONL/SQLite metadata. This is
+infrastructure plumbing, not heuristic classification. Both Claude and OpenCode
+overwrite their process titles, but on macOS arm64 (v2.1.44+) process args may
+still be visible via `ps -eo args=`. State files and Codex metadata remain the
+primary extraction methods, with process args as a last fallback.
 
 ## Key conventions
 
@@ -81,7 +81,7 @@ process args as a reliable fallback.
   (space-separated list, set in tmux.conf)
 - Log files go to `~/.tmux/resurrect/assistant-{save,restore}.log` (truncated to 500 lines per run)
 - Process inspection uses `ps -eo pid=,ppid=` (not `pgrep -P` -- unreliable on macOS)
-- Agent detection matches binary names via `case` patterns in `detect_tool()`
+- Agent detection matches binary names in `detect_tool()`
 - Hook matching should tolerate malformed entries that lack `.command`
 - Use the Python runtime's single-quote `posix_quote()` semantics for any values
   sent to tmux panes via `send-keys` (safe for bash, zsh, fish, and other

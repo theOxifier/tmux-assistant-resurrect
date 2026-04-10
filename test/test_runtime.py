@@ -115,33 +115,6 @@ class ClaudeSessionTests(TempEnvMixin, unittest.TestCase):
             "ses_fallback",
         )
 
-    def test_claude_pid_session_file_fallback_requires_matching_project_transcript(self) -> None:
-        session_dir = self.home / ".claude" / "sessions"
-        session_dir.mkdir(parents=True, exist_ok=True)
-        project_dir = self.home / ".claude" / "projects" / "-tmp"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / "ses_from_pid_file.jsonl").write_text("{}\n", encoding="utf-8")
-        (session_dir / "12345.json").write_text(
-            json.dumps({"pid": 12345, "sessionId": "ses_from_pid_file", "cwd": "/tmp"}) + "\n",
-            encoding="utf-8",
-        )
-        self.assertEqual(
-            runtime.get_claude_session(12345, "claude"),
-            "ses_from_pid_file",
-        )
-
-    def test_claude_pid_session_file_ignores_non_project_session(self) -> None:
-        session_dir = self.home / ".claude" / "sessions"
-        session_dir.mkdir(parents=True, exist_ok=True)
-        (session_dir / "12345.json").write_text(
-            json.dumps({"pid": 12345, "sessionId": "ses_ephemeral_only", "cwd": "/tmp"}) + "\n",
-            encoding="utf-8",
-        )
-        self.assertEqual(
-            runtime.get_claude_session(12345, "claude"),
-            "",
-        )
-
     def test_pane_state_fallback(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         (self.state_dir / "claude-11111.json").write_text(

@@ -40,12 +40,12 @@ to address the chicken-and-egg problem (session IDs may be in process args
 before hooks/plugins have fired):
 
 - **Claude Code**: `SessionStart` hook state file keyed by Claude's PID
-  (primary); `~/.claude/sessions/<pid>.json` only when its `sessionId` also
-  exists as a durable project transcript under `~/.claude/projects`
-  (secondary); same-pane state file fallback via captured `TMUX_PANE` when the
+  (primary); same-pane state file fallback via captured `TMUX_PANE` when the
   hook wrote a valid state file but the Claude PID changed inside that pane;
   `--resume <id>` in process args (last fallback -- note: Claude overwrites its
-  process title, so this only works if args are still visible)
+  process title, so this only works if args are still visible). The runtime does
+  not read Claude's internal session files; without the hook, new unnamed Claude
+  sessions are intentionally skipped instead of guessed.
 - **OpenCode**: plugin state file keyed by the OpenCode PID (primary for live
   saves); same-pane state file fallback via captured `TMUX_PANE` when the
   plugin state is valid but the visible PID changed inside the pane; `-s` /

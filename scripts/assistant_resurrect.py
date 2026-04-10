@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """tmux-assistant-resurrect runtime.
 
-Python runtime for save/restore orchestration, hook installation, and
-assistant-native hook handling.
+Python runtime for save/restore orchestration and assistant-native hook
+handling.
 """
 
 from __future__ import annotations
@@ -559,48 +559,17 @@ def normalize_int(value: Any) -> int:
         return 0
 
 
-def load_claude_project_session_ids() -> set[str]:
-    projects_root = Path.home() / ".claude" / "projects"
-    session_ids: set[str] = set()
-    if not projects_root.exists():
-        return session_ids
-    for path in projects_root.glob("*/*.jsonl"):
-        session_id = path.stem
-        if session_id:
-            session_ids.add(session_id)
-    return session_ids
-
-
-def read_claude_session_file(child_pid: int, known_project_sessions: set[str] | None = None) -> str:
-    path = Path.home() / ".claude" / "sessions" / f"{child_pid}.json"
-    data = read_json_file(path)
-    if not isinstance(data, dict):
-        return ""
-    for key in ("sessionId", "session_id"):
-        session_id = data.get(key)
-        if isinstance(session_id, str) and session_id:
-            if known_project_sessions is None:
-                known_project_sessions = load_claude_project_session_ids()
-            if session_id in known_project_sessions:
-                return session_id
-    return ""
-
-
 def get_claude_session(
     child_pid: int,
     args: str,
     cache: dict[str, dict[str, Any]] | None = None,
     pane_id: str = "",
     live_pids: set[int] | None = None,
-    known_project_sessions: set[str] | None = None,
 ) -> str:
     cache = cache or state_file_cache()
     data = session_state_from_pid(child_pid, cache)
     if data:
         return state_session_id(data)
-    file_session_id = read_claude_session_file(child_pid, known_project_sessions)
-    if file_session_id:
-        return file_session_id
     data = session_state_from_pane_state("claude", pane_id, cache, live_pids)
     if data:
         return state_session_id(data)
@@ -906,7 +875,6 @@ def save_runtime() -> int:
     panes = parse_pane_snapshot(pane_snapshot)
     processes, children = parse_ps_snapshot(ps_proc.stdout)
     state_cache = state_file_cache()
-    claude_project_sessions = load_claude_project_session_ids()
     codex_meta = load_codex_metadata()
     used_codex_ids: set[str] = set()
     sessions: list[dict[str, Any]] = []
@@ -933,7 +901,6 @@ def save_runtime() -> int:
                     state_cache,
                     pane.pane_id,
                     pane_live_pids,
-                    claude_project_sessions,
                 )
             elif process.tool == "opencode":
                 session_id = get_opencode_session(
