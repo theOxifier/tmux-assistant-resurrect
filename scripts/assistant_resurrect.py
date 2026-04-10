@@ -13,12 +13,9 @@ import json
 import os
 import re
 import shlex
-import shutil
 import sqlite3
 import subprocess
 import sys
-import tarfile
-import tempfile
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -857,59 +854,6 @@ def read_saved_sessions() -> tuple[list[dict[str, Any]], str]:
     return list(sessions or []), timestamp
 
 
-def strip_assistant_pane_contents_runtime(
-    *,
-    sessions: list[dict[str, Any]] | None = None,
-    output_path: Path | None = None,
-    resurrect_path: Path | None = None,
-    log_path: Path | None = None,
-) -> int:
-    output_path = output_path or output_file()
-    resurrect_path = resurrect_path or resurrect_dir()
-    log_path = log_path or save_log_file()
-
-    if sessions is None:
-        data = read_json_file(output_path)
-        sessions = list((data or {}).get("sessions") or [])
-
-    archive_path = resurrect_path / "pane_contents.tar.gz"
-    if not archive_path.exists():
-        return 0
-
-    pane_targets = [
-        entry.get("pane")
-        for entry in sessions
-        if isinstance(entry, dict) and isinstance(entry.get("pane"), str)
-    ]
-    if not pane_targets:
-        return 0
-
-    tmpdir = Path(tempfile.mkdtemp())
-    removed = 0
-    try:
-        with tarfile.open(archive_path, "r:gz") as archive:
-            archive.extractall(tmpdir)
-
-        for pane_target in pane_targets:
-            content_file = tmpdir / "pane_contents" / f"pane-{pane_target}"
-            if content_file.exists():
-                content_file.unlink()
-                removed += 1
-
-        if removed:
-            tmp_archive = archive_path.with_suffix(".tar.gz.tmp")
-            with tarfile.open(tmp_archive, "w:gz") as archive:
-                archive.add(tmpdir / "pane_contents", arcname="./pane_contents")
-            tmp_archive.replace(archive_path)
-            log(log_path, f"stripped pane contents for {removed} assistant pane(s)")
-        return 0
-    except (OSError, tarfile.TarError):
-        log(log_path, "warning: failed to repack pane_contents archive")
-        return 0
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-
 def session_entry_to_dict(entry: SessionEntry) -> dict[str, Any]:
     return {
         "pane": entry.pane,
@@ -1083,8 +1027,6 @@ def save_runtime() -> int:
     log(log_path, f"saved {len(sessions)} assistant session(s) to {output_path}")
     for message in summarize_session_changes(previous_sessions, sessions):
         log(log_path, message)
-    if sessions:
-        strip_assistant_pane_contents_runtime(sessions=sessions, output_path=output_path, log_path=log_path)
     return 0
 
 

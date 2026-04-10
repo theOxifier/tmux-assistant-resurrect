@@ -8,14 +8,14 @@ session IDs and restore them automatically.
 
 ## Architecture
 
-- `tmux-assistant-resurrect.tmux` -- TPM plugin entry point (sets tmux options, installs hooks)
+- `tmux-assistant-resurrect.tmux` -- TPM plugin entry point (wires tmux save/restore hooks only)
 - `hooks/` -- Native hooks/plugins for each assistant tool (write session IDs to state files)
 - `scripts/assistant_resurrect.py` -- Core Python runtime for save/restore and Claude hook handling
-- `scripts/assistant_admin.py` -- Admin/runtime setup for install/uninstall/status/clean
-- `config/` -- tmux configuration snippet (used by `just install`, not TPM)
+- `scripts/assistant_admin.py` -- Explicit assistant hook/plugin installation plus status/clean helpers
+- `config/` -- reference tmux configuration snippet for manual setups
 - `docs/design-principles.md` -- Detection approach, session ID extraction, process title behavior
-- `justfile` -- Developer recipes (install, uninstall, status, test); end users use TPM
-- `test/` -- Python unit tests plus Docker-based integration tests with real CLI binaries
+- `justfile` -- Developer recipes (hooks, status, save/restore, tests)
+- `test/` -- Python unit tests plus an opt-in Docker-based integration suite with real CLI binaries
 
 ## Design constraints
 
@@ -24,9 +24,15 @@ session IDs and restore them automatically.
 - **Restore hook is the sole launcher**: Assistants must NOT be listed in
   `@resurrect-processes`. The post-restore hook handles all resuming with correct
   session IDs. Adding them to `@resurrect-processes` causes double-launch.
-- **TPM-only installation for end users**: Users install via TPM (`set -g @plugin
-  'theOxifier/tmux-assistant-resurrect'` + `prefix + I`). The `justfile` recipes are
-  for developers only.
+- **TPM wires tmux, assistant-native hooks are explicit**: Users install via TPM
+  (`set -g @plugin 'theOxifier/tmux-assistant-resurrect'` + `prefix + I`), then
+  run `assistant_admin.py install-hooks` once for Claude/OpenCode. The tmux
+  entry point must not rewrite assistant config on every startup.
+- **Safe TPM update binding**: TPM's stock `prefix + U` binding sends `C-c`
+  into the active pane before running the update prompt. The plugin overrides
+  that binding by default with `scripts/tpm-safe-update.sh` so updating TPM
+  plugins from an assistant pane does not interrupt the assistant. Respect
+  `@assistant-resurrect-safe-tpm-update 'off'` if users want stock TPM behavior.
 - **Python owns runtime behavior**: Save/restore/session-resolution logic lives
   in `scripts/assistant_resurrect.py`. Do not reintroduce sourced-shell helper APIs.
 - **Pipe delimiter in tmux format output**: tmux 3.4 converts tabs and control
@@ -106,8 +112,6 @@ changes after an upgrade, check the relevant source to confirm.
 | **OpenCode Go binary overwrites process title** | `-s <id>` is often NOT visible in `ps`; the plugin state file is the reliable source for live saves, with explicit `-s` / `--session` args as a secondary path when visible | Run `ps -eo args=` on a running `opencode -s <id>` process |
 | **OpenCode SQLite DB** at `~/.local/share/opencode/opencode.db` | Useful for manual inspection and debugging, but the live save path intentionally does not trust cwd-only DB fallback because it can restore the wrong session | Check DB schema: `sqlite3 ~/.local/share/opencode/opencode.db ".schema session"` |
 | **Codex writes `~/.codex/session-tags.jsonl`** | Primary session ID source for Codex (PID → session mapping) | Run Codex and check `cat ~/.codex/session-tags.jsonl` |
-| **tmux-resurrect pane content archive** layout: `./pane_contents/pane-{session}:{window}.{pane}` inside `pane_contents.tar.gz` | `strip_assistant_pane_contents()` removes assistant pane files from this archive to prevent stale TUI flash on restore | tmux-resurrect source: `scripts/helpers.sh:pane_contents_file()` |
-
 ## Platform gotchas
 
 These are hard-won lessons. Do not "simplify" them away.
@@ -126,12 +130,16 @@ These are hard-won lessons. Do not "simplify" them away.
 
 ## Testing
 
-Tests run in Docker with real CLI binaries (`@anthropic-ai/claude-code`,
-`opencode-ai`, `@openai/codex`). No mocks, no API keys needed.
+The default test gate is Python unit tests. The full integration suite runs in
+Docker with real CLI binaries (`@anthropic-ai/claude-code`, `opencode-ai`,
+`@openai/codex`). No mocks, no API keys needed.
 
 ```bash
-# Run the full test suite in Docker
+# Run the fast default test gate
 just test
+
+# Run the full Docker-backed integration suite
+just test-extended
 
 # Manual debugging on a live system
 just save                          # trigger a save manually
@@ -145,6 +153,7 @@ cat ~/.tmux/resurrect/assistant-restore.log
 ### Test infrastructure notes
 
 - Runtime internals are tested from Python unit tests, not by sourcing shell files.
+- Keep `just test` fast; reserve `just test-extended` for broad end-to-end coverage.
 - Tests use polling helpers (`wait_for_child`, `wait_for_descendant`,
   `wait_for_death`) instead of fixed `sleep` -- fast on fast machines,
   tolerant on slow CI.

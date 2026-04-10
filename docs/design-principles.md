@@ -25,6 +25,13 @@ latency per pane.
 - Poll panes for readiness during restore instead of using fixed sleeps
 - Confirm assistant launch after `send-keys` and retry panes that did not actually start
 
+The TPM entrypoint only wires tmux save/restore hooks. Assistant-native
+integrations are explicit one-time installs through
+`scripts/assistant_admin.py install-hooks`, so tmux startup does not rewrite
+`~/.claude/settings.json` or OpenCode plugin state on the user's behalf.
+It also replaces TPM's stock `prefix + U` binding with a safe update prompt
+because TPM normally sends `C-c` into the active pane before updating plugins.
+
 ## Session ID extraction
 
 Session IDs are extracted through tool-native mechanisms -- infrastructure

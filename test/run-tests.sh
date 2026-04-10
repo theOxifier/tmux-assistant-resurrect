@@ -1217,88 +1217,42 @@ echo "=== Test 7: TPM plugin entry point (.tmux file) ==="
 echo ""
 
 # Clean up from previous tests — remove claude hooks and opencode plugin
-just uninstall 2>&1 >/dev/null
+python3 "$REPO_DIR/scripts/assistant_admin.py" uninstall-hooks >/dev/null 2>&1 || true
 
-# Remove claude settings entirely to test from scratch
+# Remove assistant config entirely to test from scratch
 rm -f "$HOME/.claude/settings.json"
 rm -rf "$HOME/.config/opencode/plugins"
 
 # Run the TPM plugin entry point (simulates what TPM does on prefix+I)
 bash "$REPO_DIR/tmux-assistant-resurrect.tmux"
 
-# Verify Claude hooks installed
-assert_file_exists "TPM: Claude settings.json created" "$HOME/.claude/settings.json"
-tpm_hook_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
-assert_eq "TPM: Claude SessionStart hook present" "1" "$tpm_hook_count"
-tpm_cleanup_count=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))] | length' "$HOME/.claude/settings.json")
-assert_eq "TPM: Claude SessionEnd hook present" "1" "$tpm_cleanup_count"
+# Verify the tmux hook options were configured
+tpm_save_hook=$(tmux show-option -gqv @resurrect-hook-post-save-all 2>/dev/null || true)
+tpm_restore_hook=$(tmux show-option -gqv @resurrect-hook-post-restore-all 2>/dev/null || true)
+assert_contains "TPM: save hook configured" "$tpm_save_hook" "assistant_resurrect.py' save"
+assert_contains "TPM: restore hook configured" "$tpm_restore_hook" "assistant_resurrect.py' restore"
 
-# Verify OpenCode plugin symlinked
-if [ -L "$HOME/.config/opencode/plugins/session-tracker.js" ]; then
-	pass "TPM: OpenCode plugin symlinked"
+# Verify TPM update was rebound without injecting Ctrl-C into the active pane
+tpm_update_binding=$(tmux list-keys -T prefix U 2>/dev/null || true)
+assert_contains "TPM: safe update binding installed" "$tpm_update_binding" "tpm-safe-update.sh"
+if printf '%s\n' "$tpm_update_binding" | grep -qF "send-keys C-c"; then
+	fail "TPM: update binding still sends C-c into active pane"
 else
-	fail "TPM: OpenCode plugin not symlinked"
+	pass "TPM: update binding does not send C-c"
 fi
 
-# Verify idempotent (run again, no duplicates)
-bash "$REPO_DIR/tmux-assistant-resurrect.tmux"
-tpm_hook_count_after=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
-assert_eq "TPM: Idempotent (no duplicate hooks)" "1" "$tpm_hook_count_after"
+# Verify assistant-native config was NOT mutated on startup
+if [ ! -e "$HOME/.claude/settings.json" ]; then
+	pass "TPM: Claude config left untouched"
+else
+	fail "TPM: Claude config should not be created on startup"
+fi
 
-# --- Test 7b: Upgrade path — old unquoted hooks don't cause duplicates ---
-#
-# Before the contains() fix, the plugin used exact string matching. If a user
-# had the old unquoted form (bash /path/to/hook.sh) and upgraded to the new
-# quoted form (bash '/path/to/hook.sh'), the idempotency check would miss
-# the old entry and create a duplicate.
-
-echo ""
-echo "=== Test 7b: Upgrade path — unquoted-to-quoted hook migration ==="
-echo ""
-
-# Start fresh
-rm -f "$HOME/.claude/settings.json"
-echo '{}' >"$HOME/.claude/settings.json"
-
-# Simulate the OLD (pre-fix) unquoted hook format by injecting directly
-old_unquoted_track="bash $REPO_DIR/hooks/claude-session-track.sh"
-old_unquoted_cleanup="bash $REPO_DIR/hooks/claude-session-cleanup.sh"
-tmp_upgrade=$(mktemp)
-jq --arg track "$old_unquoted_track" --arg cleanup "$old_unquoted_cleanup" '
-    .hooks = {
-        "SessionStart": [{
-            "matcher": "",
-            "hooks": [{"type": "command", "command": $track}]
-        }],
-        "SessionEnd": [{
-            "matcher": "",
-            "hooks": [{"type": "command", "command": $cleanup}]
-        }]
-    }
-' "$HOME/.claude/settings.json" >"$tmp_upgrade" && mv "$tmp_upgrade" "$HOME/.claude/settings.json"
-
-# Verify old hooks are in place
-old_track_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
-assert_eq "Upgrade: old unquoted hook present before upgrade" "1" "$old_track_count"
-
-# Run the TPM plugin entry point (simulates upgrade to new quoted form)
-bash "$REPO_DIR/tmux-assistant-resurrect.tmux"
-
-# The plugin should detect the old entry via contains() and NOT add a duplicate
-upgrade_track_count=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
-assert_eq "Upgrade: no duplicate SessionStart hooks after upgrade" "1" "$upgrade_track_count"
-
-upgrade_cleanup_count=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))] | length' "$HOME/.claude/settings.json")
-assert_eq "Upgrade: no duplicate SessionEnd hooks after upgrade" "1" "$upgrade_cleanup_count"
-
-# Now test uninstall via justfile — it should remove both old and new forms
-just uninstall 2>&1 >/dev/null
-
-upgrade_remaining=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json" 2>/dev/null || echo "0")
-assert_eq "Upgrade: uninstall removes old unquoted hooks" "0" "$upgrade_remaining"
-
-upgrade_remaining_cleanup=$(jq '[.hooks.SessionEnd[]?.hooks[]? | select(.command | contains("claude-session-cleanup"))] | length' "$HOME/.claude/settings.json" 2>/dev/null || echo "0")
-assert_eq "Upgrade: uninstall removes old unquoted cleanup hooks" "0" "$upgrade_remaining_cleanup"
+if [ ! -e "$HOME/.config/opencode/plugins/session-tracker.js" ]; then
+	pass "TPM: OpenCode plugin left untouched"
+else
+	fail "TPM: OpenCode plugin should not be linked on startup"
+fi
 
 # --- Test 7c: Install/uninstall with malformed hook entries (null .command) ---
 #
@@ -1322,9 +1276,9 @@ cat >"$HOME/.claude/settings.json" <<'MALEOF'
 }
 MALEOF
 
-# Install should not crash — the malformed entry has no .command at all
+# Explicit hook install should not crash — the malformed entry has no .command at all
 install_malformed_exit=0
-bash "$REPO_DIR/tmux-assistant-resurrect.tmux" 2>&1 || install_malformed_exit=$?
+python3 "$REPO_DIR/scripts/assistant_admin.py" install-hooks 2>&1 || install_malformed_exit=$?
 assert_eq "Install doesn't crash on hook entry without .command" "0" "$install_malformed_exit"
 
 # Our hook should be added alongside the existing malformed entry
@@ -1337,7 +1291,7 @@ assert_eq "Install preserves existing malformed entries" "1" "$malformed_url"
 
 # Uninstall should not crash either
 uninstall_malformed_exit=0
-just uninstall 2>&1 || uninstall_malformed_exit=$?
+python3 "$REPO_DIR/scripts/assistant_admin.py" uninstall-hooks 2>&1 || uninstall_malformed_exit=$?
 assert_eq "Uninstall doesn't crash on hook entry without .command" "0" "$uninstall_malformed_exit"
 
 # The malformed entry should survive uninstall (we only remove our hooks)
@@ -1347,7 +1301,7 @@ assert_eq "Uninstall preserves non-matching entries" "1" "$malformed_url_after"
 # --- Test 7d: invalid Claude settings fail closed ---
 #
 # A malformed ~/.claude/settings.json must not be overwritten. Direct install
-# should fail nonzero, and the TPM entrypoint should leave the file untouched.
+# should fail nonzero, and the TPM entrypoint must not touch the file either.
 
 echo ""
 echo "=== Test 7d: invalid Claude settings fail closed ==="

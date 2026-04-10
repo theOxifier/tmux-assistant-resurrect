@@ -14,7 +14,7 @@ _state_dir_expr := 'STATE_DIR="${TMUX_ASSISTANT_RESURRECT_DIR:-${XDG_RUNTIME_DIR
 default:
     @just --list
 
-# Install everything: TPM, hooks, and tmux config
+# Install everything for a local/dev setup: TPM, assistant hooks, and tmux config
 install: install-tpm install-hooks configure-tmux
     @echo ""
     @echo "Installation complete!"
@@ -34,7 +34,7 @@ install-tpm:
         echo "TPM installed at ~/.tmux/plugins/tpm"; \
     fi
 
-# Install TPM plugins (resurrect + continuum)
+# Install TPM plugins
 install-plugins:
     @if [ -x ~/.tmux/plugins/tpm/bin/install_plugins ]; then \
         ~/.tmux/plugins/tpm/bin/install_plugins; \
@@ -106,14 +106,12 @@ configure-tmux:
         echo "$begin_marker"
         echo "set -g @plugin 'tmux-plugins/tpm'"
         echo "set -g @plugin 'tmux-plugins/tmux-resurrect'"
-        echo "set -g @plugin 'tmux-plugins/tmux-continuum'"
-        echo "# Optional: restore terminal text in non-assistant panes after tmux restart."
-        echo "# Assistant pane contents are stripped automatically by the save hook."
-        echo "# set -g @resurrect-capture-pane-contents 'on'"
+        echo "# Optional: add tmux-continuum if you want periodic autosave and restore-on-start."
+        echo "# set -g @plugin 'tmux-plugins/tmux-continuum'"
+        echo "# Optional: keep TPM's stock prefix+U behavior instead of the safe update prompt."
+        echo "# set -g @assistant-resurrect-safe-tpm-update 'off'"
         echo "set -g @resurrect-hook-post-save-all \"python3 '{{repo_dir}}/scripts/assistant_resurrect.py' save\""
         echo "set -g @resurrect-hook-post-restore-all \"python3 '{{repo_dir}}/scripts/assistant_resurrect.py' restore\""
-        echo "set -g @continuum-save-interval '5'"
-        echo "set -g @continuum-restore 'on'"
         echo "$end_marker"
     } >> "$conf"
     echo "Added tmux-assistant-resurrect settings to $conf"
@@ -189,8 +187,12 @@ restore:
 clean:
     @python3 "{{repo_dir}}/scripts/assistant_admin.py" clean
 
-# Run integration tests in Docker
+# Run the fast core test gate
 test:
+    python3 -m unittest test.test_runtime
+
+# Run the full Docker-backed integration suite
+test-extended:
     docker build -t tmux-assistant-resurrect-test -f test/Dockerfile .
     docker run --rm tmux-assistant-resurrect-test
 

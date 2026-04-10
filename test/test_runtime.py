@@ -9,7 +9,6 @@ import os
 import sqlite3
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 import unittest
@@ -420,34 +419,6 @@ class ConfigSafetyTests(TempEnvMixin, unittest.TestCase):
         self.assertEqual(settings_path.read_text(encoding="utf-8"), "{ invalid\n")
 
 
-class StripPaneContentsTests(TempEnvMixin, unittest.TestCase):
-    def test_strip_assistant_pane_contents(self) -> None:
-        resurrect_dir = self.home / ".tmux" / "resurrect"
-        pane_dir = resurrect_dir / "pane_contents"
-        pane_dir.mkdir(parents=True, exist_ok=True)
-        (pane_dir / "pane-assistant-session:0.0").write_text("assistant\n", encoding="utf-8")
-        (pane_dir / "pane-regular-session:0.0").write_text("regular\n", encoding="utf-8")
-        archive_path = resurrect_dir / "pane_contents.tar.gz"
-        with tarfile.open(archive_path, "w:gz") as archive:
-            archive.add(pane_dir, arcname="./pane_contents")
-        sessions = [
-            {"pane": "assistant-session:0.0", "tool": "claude", "session_id": "ses_1", "cwd": "/tmp"}
-        ]
-        runtime.strip_assistant_pane_contents_runtime(
-            sessions=sessions,
-            resurrect_path=resurrect_dir,
-            output_path=resurrect_dir / "assistant-sessions.json",
-            log_path=resurrect_dir / "assistant-save.log",
-        )
-
-        extract_dir = self.home / "extract"
-        extract_dir.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(archive_path, "r:gz") as archive:
-            archive.extractall(extract_dir)
-        self.assertFalse((extract_dir / "pane_contents" / "pane-assistant-session:0.0").exists())
-        self.assertTrue((extract_dir / "pane_contents" / "pane-regular-session:0.0").exists())
-
-
 class SaveRuntimeTests(TempEnvMixin, unittest.TestCase):
     def test_save_runtime_preserves_env_from_pane_fallback(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -469,8 +440,6 @@ class SaveRuntimeTests(TempEnvMixin, unittest.TestCase):
 
         original_run_command = runtime.run_command
         original_tmux_capture = runtime.tmux_capture
-        original_strip = runtime.strip_assistant_pane_contents_runtime
-
         def fake_run_command(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             if argv == ["ps", "-eo", "pid=,ppid=,args="]:
                 stdout = "\n".join(
@@ -492,13 +461,11 @@ class SaveRuntimeTests(TempEnvMixin, unittest.TestCase):
 
         runtime.run_command = fake_run_command
         runtime.tmux_capture = fake_tmux_capture
-        runtime.strip_assistant_pane_contents_runtime = lambda **_: 0
         try:
             self.assertEqual(runtime.save_runtime(), 0)
         finally:
             runtime.run_command = original_run_command
             runtime.tmux_capture = original_tmux_capture
-            runtime.strip_assistant_pane_contents_runtime = original_strip
 
         payload = json.loads(output_path.read_text(encoding="utf-8"))
         self.assertEqual(

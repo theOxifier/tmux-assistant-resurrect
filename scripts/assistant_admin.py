@@ -55,7 +55,6 @@ def status_runtime() -> int:
 
     print(f"{marker((Path.home() / '.tmux' / 'plugins' / 'tpm').exists())} TPM installed")
     print(f"{marker((Path.home() / '.tmux' / 'plugins' / 'tmux-resurrect').exists())} tmux-resurrect installed")
-    print(f"{marker((Path.home() / '.tmux' / 'plugins' / 'tmux-continuum').exists())} tmux-continuum installed")
 
     tmux_conf = Path.home() / ".tmux.conf"
     configured = False
