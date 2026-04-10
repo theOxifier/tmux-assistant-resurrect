@@ -224,22 +224,15 @@ kill_pane_children() {
 	fi
 }
 
-# --- Test 1: Installation ---
+# --- Test 1: assistant hook installation ---
 
 suite "install"
 echo ""
-echo "=== Test 1: just install ==="
+echo "=== Test 1: explicit assistant hook installation ==="
 echo ""
 
 cd "$REPO_DIR"
-just install 2>&1
-
-# Verify TPM installed
-if [ -d "$HOME/.tmux/plugins/tpm" ]; then
-	pass "TPM installed"
-else
-	fail "TPM not installed"
-fi
+just install-hooks 2>&1
 
 # Verify Claude hooks in settings.json
 assert_file_exists "Claude settings.json created" "$HOME/.claude/settings.json"
@@ -257,16 +250,11 @@ else
 	fail "OpenCode plugin not symlinked"
 fi
 
-# Verify tmux.conf configured
-assert_file_exists "tmux.conf exists" "$HOME/.tmux.conf"
-assert_contains "tmux.conf has marker block" "$(cat "$HOME/.tmux.conf")" "begin tmux-assistant-resurrect"
-assert_contains "tmux.conf has Python hook paths" "$(cat "$HOME/.tmux.conf")" "assistant_resurrect.py' save"
-
-# Verify idempotent install (run again, should not duplicate)
-just install 2>&1 >/dev/null
+# Verify idempotent hook install (run again, should not duplicate)
+just install-hooks 2>&1 >/dev/null
 
 hook_count_after=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json")
-assert_eq "Install is idempotent (no duplicate hooks)" "1" "$hook_count_after"
+assert_eq "Hook install is idempotent (no duplicate hooks)" "1" "$hook_count_after"
 
 # --- Test 2: Save — detect assistants in tmux panes ---
 
@@ -710,14 +698,14 @@ assert_contains "Restore skips non-shell pane" "$(cat "$RESTORE_LOG")" "not a sh
 # Clean up — kill the sleep and get the pane back to a shell
 kill_pane_children test-claude
 
-# --- Test 4: Uninstall ---
+# --- Test 4: assistant hook uninstall ---
 
 suite "uninstall"
 echo ""
-echo "=== Test 4: just uninstall ==="
+echo "=== Test 4: explicit assistant hook uninstall ==="
 echo ""
 
-just uninstall 2>&1
+just uninstall-hooks 2>&1
 
 # Verify Claude hooks removed
 remaining_hooks=$(jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("claude-session-track"))] | length' "$HOME/.claude/settings.json" 2>/dev/null || echo "0")
@@ -725,20 +713,6 @@ assert_eq "Claude hooks removed after uninstall" "0" "$remaining_hooks"
 
 # Verify OpenCode plugin removed
 assert_file_not_exists "OpenCode plugin removed" "$HOME/.config/opencode/plugins/session-tracker.js"
-
-# Verify tmux.conf cleaned
-if grep -qF "begin tmux-assistant-resurrect" "$HOME/.tmux.conf" 2>/dev/null; then
-	fail "tmux.conf still has marker block after uninstall"
-else
-	pass "tmux.conf marker block removed"
-fi
-
-# Verify plugin lines within the block are also gone
-if grep -qF "assistant_resurrect.py" "$HOME/.tmux.conf" 2>/dev/null; then
-	fail "tmux.conf still has Python hook paths after uninstall"
-else
-	pass "tmux.conf hook paths removed"
-fi
 
 # --- Test 5: Claude hooks (SessionStart / SessionEnd) ---
 
@@ -812,23 +786,6 @@ fi
 # Clean up tmux option
 tmux set-option -gu @assistant-resurrect-capture-env 2>/dev/null || true
 unset MY_CUSTOM_VAR
-
-# Test backward compatibility: minimal JSON (old format) still works
-echo '{"session_id": "ses_minimal_test", "cwd": "/tmp"}' | bash "$REPO_DIR/hooks/claude-session-track.sh"
-minimal_state="$TMUX_ASSISTANT_RESURRECT_DIR/claude-$$.json"
-if [ -f "$minimal_state" ]; then
-	minimal_sid=$(jq -r '.session_id' "$minimal_state")
-	assert_eq "Minimal input still produces valid session_id" "ses_minimal_test" "$minimal_sid"
-	# model should be absent (null) — not crash
-	minimal_model=$(jq -r '.model // "absent"' "$minimal_state")
-	assert_eq "Minimal input has no model field" "absent" "$minimal_model"
-	# tool field should still be present
-	minimal_tool=$(jq -r '.tool' "$minimal_state")
-	assert_eq "Minimal input still has tool field" "claude" "$minimal_tool"
-	rm -f "$minimal_state"
-else
-	fail "SessionStart hook state file not created for minimal input test"
-fi
 
 # Test SessionStart hook with special characters (JSON escaping)
 echo '{"session_id": "ses_quote\"test", "cwd": "/tmp/project'\''s dir"}' | bash "$REPO_DIR/hooks/claude-session-track.sh"
@@ -1166,9 +1123,6 @@ echo ""
 echo "=== Test 6: just clean ==="
 echo ""
 
-# Re-install for the clean test
-just install 2>&1 >/dev/null
-
 # Create a stale state file with a dead PID
 STATE_DIR="$TEST_STATE_DIR"
 mkdir -p "$STATE_DIR"
@@ -1322,107 +1276,11 @@ assert_eq "TPM entrypoint leaves invalid Claude settings untouched" "$invalid_be
 rm -f /tmp/invalid-claude-install.err
 rm -f "$HOME/.claude/settings.json"
 
-# --- Test 7e: tmux.conf upgrade from legacy source-file to marker block ---
-#
-# If ~/.tmux.conf has the old source-file line (pre-marker), configure-tmux
-# should remove it and write the new marker block.
-
-echo ""
-echo "=== Test 7e: tmux.conf upgrade from legacy source-file format ==="
-echo ""
-
-# Simulate an old-format ~/.tmux.conf with a legacy source-file line,
-# a CUSTOM TPM path, and a commented-out TPM example after the real init.
-# The commented line must NOT be captured as the TPM init.
-cat >"$HOME/.tmux.conf" <<'LEGEOF'
-# user settings
-set -g mouse on
-
-# tmux-assistant-resurrect
-source-file '/old/path/to/tmux-assistant-resurrect/config/resurrect-assistants.conf'
-
-run '/custom/path/tpm/tpm'
-# example: run '~/.tmux/plugins/tpm/tpm'
-LEGEOF
-
-just configure-tmux 2>&1
-
-# The legacy source-file line should be gone
-if grep -qF "resurrect-assistants.conf" "$HOME/.tmux.conf" 2>/dev/null; then
-	fail "Legacy source-file line still present after upgrade"
-else
-	pass "Legacy source-file line removed on upgrade"
-fi
-
-# The new marker block should be present
-if grep -qF "begin tmux-assistant-resurrect" "$HOME/.tmux.conf" 2>/dev/null; then
-	pass "Marker block added on upgrade"
-else
-	fail "Marker block missing after upgrade"
-fi
-
-# The hook paths should point to the real repo dir
-if grep -qF "assistant_resurrect.py" "$HOME/.tmux.conf" 2>/dev/null; then
-	pass "Hook paths present in marker block"
-else
-	fail "Hook paths missing from marker block"
-fi
-
-# TPM init must come AFTER the marker block (TPM ignores lines after its run line)
-end_line=$(grep -n "end tmux-assistant-resurrect" "$HOME/.tmux.conf" | tail -1 | cut -d: -f1)
-tpm_line_num=$(grep -n "tpm/tpm" "$HOME/.tmux.conf" | tail -1 | cut -d: -f1)
-if [ -n "$end_line" ] && [ -n "$tpm_line_num" ] && [ "$tpm_line_num" -gt "$end_line" ]; then
-	pass "TPM init line is after marker block"
-else
-	fail "TPM init line is NOT after marker block (end=$end_line, tpm=$tpm_line_num)"
-fi
-
-# Custom TPM path must be preserved verbatim (not replaced with default)
-# The real init (uncommented) should be the one re-added, not the comment
-if grep "^run '/custom/path/tpm/tpm'" "$HOME/.tmux.conf" >/dev/null 2>&1; then
-	pass "Custom TPM path preserved during upgrade"
-else
-	fail "Custom TPM path was replaced with default"
-fi
-
-# The commented TPM example must still be present (not mistaken for real init)
-if grep -qF "# example: run" "$HOME/.tmux.conf" 2>/dev/null; then
-	pass "Commented TPM line preserved (not captured as init)"
-else
-	fail "Commented TPM line was removed"
-fi
-
-# User settings outside the block should be preserved
-if grep -qF "set -g mouse on" "$HOME/.tmux.conf" 2>/dev/null; then
-	pass "User settings preserved during upgrade"
-else
-	fail "User settings lost during upgrade"
-fi
-
-# Uninstall should remove the marker block completely
-just unconfigure-tmux 2>&1
-
-if grep -qF "begin tmux-assistant-resurrect" "$HOME/.tmux.conf" 2>/dev/null; then
-	fail "Marker block still present after unconfigure"
-else
-	pass "Unconfigure removes marker block"
-fi
-
-# User settings should still be there
-if grep -qF "set -g mouse on" "$HOME/.tmux.conf" 2>/dev/null; then
-	pass "User settings preserved after unconfigure"
-else
-	fail "User settings lost during unconfigure"
-fi
-
 # --- Test 9b: saved session includes replayable fields ---
 
 echo ""
 echo "=== Test 9b: saved session includes replayable fields ==="
 echo ""
-
-# Re-install so save/restore use the updated scripts
-just install 2>&1 >/dev/null
 
 # Create a tmux session with claude running
 tmux new-session -d -s test-enrich-claude -c /tmp
@@ -1469,49 +1327,6 @@ assert_eq "Enriched: env has tmux_pane" "%5" "$enrich_env_pane"
 
 rm -f "$TEST_STATE_DIR/claude-${enrich_child_pid}.json"
 kill_pane_children test-enrich-claude true
-
-# --- Test 9c: save tolerates minimal state files ---
-
-echo ""
-echo "=== Test 9c: save tolerates minimal state files ==="
-echo ""
-
-# Create a session with a MINIMAL state file (no model, no env — old format)
-tmux new-session -d -s test-enrich-minimal -c /tmp
-tmux send-keys -t test-enrich-minimal "claude --resume ses_minimal_enrich" Enter
-minimal_enrich_shell=$(tmux display-message -t test-enrich-minimal -p '#{pane_pid}')
-wait_for_child "$minimal_enrich_shell" "claude" 10 >/dev/null || echo "WARN"
-minimal_enrich_child=$(ps -eo pid=,ppid=,args= | awk -v ppid="$minimal_enrich_shell" '$2 == ppid && /claude/ {print $1; exit}')
-
-cat >"$TEST_STATE_DIR/claude-${minimal_enrich_child}.json" <<MEOF
-{
-  "session_id": "ses_minimal_enrich",
-  "tool": "claude",
-  "ppid": $minimal_enrich_child,
-  "timestamp": "2026-01-01T00:00:00Z"
-}
-MEOF
-
-rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
-just save 2>&1
-
-SAVED="$HOME/.tmux/resurrect/assistant-sessions.json"
-minimal_entry=$(jq '.sessions[] | select(.pane | contains("test-enrich-minimal"))' "$SAVED")
-
-# session_id must still be present
-minimal_sid=$(echo "$minimal_entry" | jq -r '.session_id')
-assert_eq "Backward compat: session_id present" "ses_minimal_enrich" "$minimal_sid"
-
-# Should not crash with missing env
-minimal_env=$(echo "$minimal_entry" | jq -r '.env // empty')
-if [ -z "$minimal_env" ]; then
-	pass "Minimal state file: missing env tolerated"
-else
-	fail "Minimal state file: unexpected env value '$minimal_env'"
-fi
-
-rm -f "$TEST_STATE_DIR/claude-${minimal_enrich_child}.json"
-kill_pane_children test-enrich-minimal true
 
 # --- Test 10: restore uses enriched fields ---
 
@@ -1595,45 +1410,10 @@ assert_contains "Restore includes ANTHROPIC_BASE_URL env prefix" "$restore_env_l
 tmux set-option -gu @assistant-resurrect-capture-env 2>/dev/null || true
 kill_pane_children test-restore-env true
 
-# --- Test 10c: Backward compat — restore with old-format sidecar JSON ---
+# --- Test 10c: Restore with empty cli_args ---
 
 echo ""
-echo "=== Test 10c: restore backward compat — no enriched fields ==="
-echo ""
-
-tmux new-session -d -s test-restore-compat -c /tmp 2>/dev/null || true
-sleep 0.5
-
-# Old-format sidecar (no cli_args, no model, no env)
-cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RCOMPAT'
-{
-  "timestamp": "2026-01-01T00:00:00Z",
-  "sessions": [
-    {
-      "pane": "test-restore-compat:0.0",
-      "tool": "claude",
-      "session_id": "ses_compat_test",
-      "cwd": "/tmp",
-      "pid": "99999"
-    }
-  ]
-}
-RCOMPAT
-
->"$RESTORE_LOG"
-just restore 2>&1
-sleep 5
-
-compat_log=$(cat "$RESTORE_LOG")
-assert_contains "Backward compat: restore still works" "$compat_log" "ses_compat_test"
-assert_contains "Backward compat: bare resume command" "$compat_log" "restoring claude"
-
-kill_pane_children test-restore-compat true
-
-# --- Test 10d: Restore with empty cli_args ---
-
-echo ""
-echo "=== Test 10d: restore with empty cli_args ==="
+echo "=== Test 10c: restore with empty cli_args ==="
 echo ""
 
 tmux new-session -d -s test-restore-empty -c /tmp 2>/dev/null || true
@@ -1667,10 +1447,10 @@ assert_contains "Empty cli_args: tool identified" "$empty_log" "restoring openco
 
 kill_pane_children test-restore-empty true
 
-# --- Test 10e: Restore filters out tmux_pane and shell from env prefix ---
+# --- Test 10d: Restore filters out tmux_pane and shell from env prefix ---
 
 echo ""
-echo "=== Test 10e: restore filters built-in env vars ==="
+echo "=== Test 10d: restore filters built-in env vars ==="
 echo ""
 
 tmux new-session -d -s test-restore-envfilter -c /tmp 2>/dev/null || true
@@ -1714,11 +1494,11 @@ fi
 tmux set-option -gu @assistant-resurrect-capture-env 2>/dev/null || true
 kill_pane_children test-restore-envfilter true
 
-# --- Test 10f: Restore quotes cli_args containing shell-special chars (e.g., []) ---
+# --- Test 10e: Restore quotes cli_args containing shell-special chars (e.g., []) ---
 
 suite "restore_special_chars"
 echo ""
-echo "=== Test 10f: restore quotes cli_args with brackets (zsh glob safety) ==="
+echo "=== Test 10e: restore quotes cli_args with brackets (zsh glob safety) ==="
 echo ""
 
 tmux new-session -d -s test-restore-bracket -c /tmp 2>/dev/null || true
@@ -1756,10 +1536,10 @@ assert_contains "Bracket model: uses command claude" "$bracket_log" "command cla
 
 kill_pane_children test-restore-bracket true
 
-# --- Test 10g: Restore strips stale codex bare-resume cli_args ---
+# --- Test 10f: Restore strips stale codex bare-resume cli_args ---
 
 echo ""
-echo "=== Test 10g: restore strips stale codex bare-resume cli_args ==="
+echo "=== Test 10f: restore strips stale codex bare-resume cli_args ==="
 echo ""
 
 tmux new-session -d -s test-restore-codex-stale -c /tmp 2>/dev/null || true
@@ -1797,10 +1577,10 @@ fi
 
 kill_pane_children test-restore-codex-stale true
 
-# --- Test 10h: Restore retries split panes until assistants actually launch ---
+# --- Test 10g: Restore retries split panes until assistants actually launch ---
 
 echo ""
-echo "=== Test 10h: restore retries split panes until launch is confirmed ==="
+echo "=== Test 10g: restore retries split panes until launch is confirmed ==="
 echo ""
 
 RETRY_BIN_DIR=$(mktemp -d)

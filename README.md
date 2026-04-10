@@ -244,6 +244,8 @@ The `justfile` is for development, not normal TPM usage.
 Useful commands:
 
 ```bash
+just install-hooks
+just uninstall-hooks
 just status
 just save
 just restore

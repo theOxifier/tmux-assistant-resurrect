@@ -60,8 +60,8 @@ def status_runtime() -> int:
     configured = False
     if tmux_conf.exists():
         conf_text = tmux_conf.read_text(encoding="utf-8", errors="ignore")
-        configured = "begin tmux-assistant-resurrect" in conf_text or "resurrect-assistants.conf" in conf_text
-    print(f"{marker(configured)} tmux.conf configured")
+        configured = "theOxifier/tmux-assistant-resurrect" in conf_text or "tmux-assistant-resurrect.tmux" in conf_text
+    print(f"{marker(configured)} tmux plugin configured")
 
     settings_path = Path.home() / ".claude" / "settings.json"
     settings = read_json_file(settings_path)

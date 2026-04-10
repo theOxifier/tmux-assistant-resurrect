@@ -12,7 +12,6 @@ session IDs and restore them automatically.
 - `hooks/` -- Native hooks/plugins for each assistant tool (write session IDs to state files)
 - `scripts/assistant_resurrect.py` -- Core Python runtime for save/restore and Claude hook handling
 - `scripts/assistant_admin.py` -- Explicit assistant hook/plugin installation plus status/clean helpers
-- `config/` -- reference tmux configuration snippet for manual setups
 - `docs/design-principles.md` -- Detection approach, session ID extraction, process title behavior
 - `justfile` -- Developer recipes (hooks, status, save/restore, tests)
 - `test/` -- Python unit tests plus an opt-in Docker-based integration suite with real CLI binaries
