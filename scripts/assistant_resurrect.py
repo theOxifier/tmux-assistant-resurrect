@@ -463,28 +463,6 @@ def read_etimes(pid: int) -> int | None:
     return int(value) if value.isdigit() else None
 
 
-def load_opencode_db() -> dict[str, list[str]]:
-    db_path = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
-    sessions_by_dir: dict[str, list[str]] = defaultdict(list)
-    if not db_path.exists():
-        return sessions_by_dir
-    try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            "SELECT id, directory, time_updated FROM session ORDER BY time_updated DESC"
-        ).fetchall()
-        conn.close()
-    except sqlite3.DatabaseError:
-        return sessions_by_dir
-    for row in rows:
-        directory = row["directory"]
-        session_id = row["id"]
-        if directory and session_id:
-            sessions_by_dir[directory].append(session_id)
-    return sessions_by_dir
-
-
 def load_codex_metadata() -> CodexMetadata:
     codex_home = Path.home() / ".codex"
     pid_to_session: dict[int, str] = {}
@@ -633,10 +611,7 @@ def get_claude_session(
 def get_opencode_session(
     child_pid: int,
     args: str,
-    cwd: str,
-    allow_db: bool = True,
     cache: dict[str, dict[str, Any]] | None = None,
-    db_sessions: dict[str, list[str]] | None = None,
     pane_id: str = "",
     live_pids: set[int] | None = None,
 ) -> str:
@@ -655,12 +630,6 @@ def get_opencode_session(
     match = re.search(r"(?:^|\s)-s\s+(\S+)", args)
     if match:
         return match.group(1)
-
-    if allow_db and cwd:
-        db_sessions = db_sessions or load_opencode_db()
-        matches = db_sessions.get(cwd) or []
-        if matches:
-            return matches[0]
     return ""
 
 
@@ -967,14 +936,9 @@ def save_runtime() -> int:
                     claude_project_sessions,
                 )
             elif process.tool == "opencode":
-                # Accuracy beats coverage here. OpenCode's cwd-based DB fallback
-                # can pick the wrong session, so the live save path only trusts
-                # PID-specific plugin state or explicit --session/-s args.
                 session_id = get_opencode_session(
                     process.pid,
                     process.args,
-                    pane.cwd,
-                    allow_db=False,
                     cache=state_cache,
                     pane_id=pane.pane_id,
                     live_pids=pane_live_pids,

@@ -409,31 +409,6 @@ if [ -n "$npx_oc_pid" ]; then
 NPXEOF
 fi
 
-# Seed DB fallback with a competing session for the same cwd. Save pass 1 should
-# still pick the PID-specific state-file session and never need this fallback.
-mkdir -p "$HOME/.local/share/opencode"
-rm -f "$HOME/.local/share/opencode/opencode.db"
-python3 - <<'PY'
-import os
-import sqlite3
-db = os.path.expanduser('~/.local/share/opencode/opencode.db')
-conn = sqlite3.connect(db)
-conn.execute('''CREATE TABLE session (
-    id TEXT PRIMARY KEY,
-    slug TEXT,
-    project_id TEXT,
-    directory TEXT,
-    title TEXT,
-    version TEXT,
-    time_created INTEGER,
-    time_updated INTEGER
-)''')
-conn.execute('''INSERT INTO session (id, slug, project_id, directory, title, version, time_created, time_updated)
-    VALUES ('ses_db_wrong_npx', 'wrong', 'global', '/tmp', 'wrong winner', '1.2.5', 1000000, 999999999999)''')
-conn.commit()
-conn.close()
-PY
-
 rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
 just save 2>&1
 
@@ -537,7 +512,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'BG_EOF'
 {
   "timestamp": "2026-01-01T00:00:00Z",
   "sessions": [
-    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_bg_guard2_test", "cwd": "/tmp", "pid": "99999"}
+    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_bg_guard2_test", "cwd": "/tmp"}
   ]
 }
 BG_EOF
@@ -579,7 +554,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'CWDEOF'
 {
   "timestamp": "2026-01-01T00:00:00Z",
   "sessions": [
-    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_cwd_test", "cwd": "/tmp/project's dir", "pid": "99999"}
+    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_cwd_test", "cwd": "/tmp/project's dir"}
   ]
 }
 CWDEOF
@@ -600,7 +575,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'CWDEOF2'
 {
   "timestamp": "2026-01-01T00:00:00Z",
   "sessions": [
-    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_nocwd_test", "cwd": "/nonexistent/path/that/does/not/exist", "pid": "99999"}
+    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_nocwd_test", "cwd": "/nonexistent/path/that/does/not/exist"}
   ]
 }
 CWDEOF2
@@ -649,7 +624,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'UNKNEOF'
 {
   "timestamp": "2026-01-01T00:00:00Z",
   "sessions": [
-    {"pane": "test-claude:0.0", "tool": "unknowntool", "session_id": "ses_unknown_test", "cwd": "/tmp", "pid": "99999"}
+    {"pane": "test-claude:0.0", "tool": "unknowntool", "session_id": "ses_unknown_test", "cwd": "/tmp"}
   ]
 }
 UNKNEOF
@@ -682,7 +657,7 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'NOSHELLEOF'
 {
   "timestamp": "2026-01-01T00:00:00Z",
   "sessions": [
-    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_noshell_test", "cwd": "/tmp", "pid": "99999"}
+    {"pane": "test-claude:0.0", "tool": "claude", "session_id": "ses_noshell_test", "cwd": "/tmp"}
   ]
 }
 NOSHELLEOF
@@ -1349,8 +1324,6 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RENRICH'
       "tool": "claude",
       "session_id": "ses_restore_flags",
       "cwd": "/tmp",
-      "pid": "99999",
-      "model": "claude-opus-4-6",
       "cli_args": "--dangerously-skip-permissions --model claude-opus-4-6",
       "env": {"tmux_pane": "%5", "shell": "/bin/bash", "ANTHROPIC_BASE_URL": "https://proxy.internal"}
     }
@@ -1389,7 +1362,6 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RENVEOF'
       "tool": "claude",
       "session_id": "ses_restore_env",
       "cwd": "/tmp",
-      "pid": "99999",
       "cli_args": "",
       "env": {"tmux_pane": "%5", "shell": "/bin/bash", "ANTHROPIC_BASE_URL": "https://proxy.internal"}
     }
@@ -1428,8 +1400,6 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'REMPTY'
       "tool": "opencode",
       "session_id": "ses_empty_cli",
       "cwd": "/tmp",
-      "pid": "99999",
-      "model": "",
       "cli_args": "",
       "env": {}
     }
@@ -1465,7 +1435,6 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RENVF'
       "tool": "claude",
       "session_id": "ses_envfilter",
       "cwd": "/tmp",
-      "pid": "99999",
       "cli_args": "",
       "env": {"tmux_pane": "%99", "shell": "/bin/zsh", "MY_CUSTOM": "hello"}
     }
@@ -1514,8 +1483,6 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RBRACKET'
       "tool": "claude",
       "session_id": "ses_bracket_test",
       "cwd": "/tmp",
-      "pid": "99999",
-      "model": "claude-opus-4-6[1m]",
       "cli_args": "--allow-dangerously-skip-permissions --model claude-opus-4-6[1m] -r"
     }
   ]
@@ -1554,7 +1521,6 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RCODEXSTALE'
       "tool": "codex",
       "session_id": "019stalecliargs00000000000000000000",
       "cwd": "/tmp",
-      "pid": "99999",
       "cli_args": "resume",
       "env": null
     }
@@ -1637,15 +1603,13 @@ cat >"$HOME/.tmux/resurrect/assistant-sessions.json" <<'RRETRY'
       "pane": "test-restore-retry:0.0",
       "tool": "claude",
       "session_id": "ses_retry_left",
-      "cwd": "/tmp",
-      "pid": "99991"
+      "cwd": "/tmp"
     },
     {
       "pane": "test-restore-retry:0.1",
       "tool": "claude",
       "session_id": "ses_retry_right",
-      "cwd": "/tmp",
-      "pid": "99992"
+      "cwd": "/tmp"
     }
   ]
 }

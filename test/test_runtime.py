@@ -185,8 +185,8 @@ class ClaudeSessionTests(TempEnvMixin, unittest.TestCase):
 
 class OpenCodeSessionTests(TempEnvMixin, unittest.TestCase):
     def test_arg_extraction(self) -> None:
-        self.assertEqual(runtime.get_opencode_session(99999, "opencode -s ses_oc_456", "/tmp"), "ses_oc_456")
-        self.assertEqual(runtime.get_opencode_session(99999, "opencode --session=ses_oc_789", "/tmp"), "ses_oc_789")
+        self.assertEqual(runtime.get_opencode_session(99999, "opencode -s ses_oc_456"), "ses_oc_456")
+        self.assertEqual(runtime.get_opencode_session(99999, "opencode --session=ses_oc_789"), "ses_oc_789")
 
     def test_pane_state_fallback(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -204,7 +204,7 @@ class OpenCodeSessionTests(TempEnvMixin, unittest.TestCase):
             encoding="utf-8",
         )
         self.assertEqual(
-            runtime.get_opencode_session(22222, "opencode", "/tmp", allow_db=False, pane_id="%4", live_pids={11111, 22222}),
+            runtime.get_opencode_session(22222, "opencode", pane_id="%4", live_pids={11111, 22222}),
             "ses_from_pane",
         )
 
@@ -224,39 +224,9 @@ class OpenCodeSessionTests(TempEnvMixin, unittest.TestCase):
             encoding="utf-8",
         )
         self.assertEqual(
-            runtime.get_opencode_session(22222, "opencode", "/tmp", allow_db=False, pane_id="%4", live_pids={22222}),
+            runtime.get_opencode_session(22222, "opencode", pane_id="%4", live_pids={22222}),
             "",
         )
-
-    def test_db_fallback(self) -> None:
-        db_dir = self.home / ".local" / "share" / "opencode"
-        db_dir.mkdir(parents=True, exist_ok=True)
-        db_path = db_dir / "opencode.db"
-        conn = sqlite3.connect(db_path)
-        conn.execute(
-            """CREATE TABLE session (
-                id TEXT PRIMARY KEY,
-                slug TEXT,
-                project_id TEXT,
-                directory TEXT,
-                title TEXT,
-                version TEXT,
-                time_created INTEGER,
-                time_updated INTEGER
-            )"""
-        )
-        conn.execute(
-            """INSERT INTO session (id, slug, project_id, directory, title, version, time_created, time_updated)
-               VALUES ('ses_newer', 'new', 'global', '/tmp/oc-project', 'newer', '1.2.5', 1000, 3000)"""
-        )
-        conn.execute(
-            """INSERT INTO session (id, slug, project_id, directory, title, version, time_created, time_updated)
-               VALUES ('ses_older', 'old', 'global', '/tmp/oc-project', 'older', '1.2.5', 1000, 2000)"""
-        )
-        conn.commit()
-        conn.close()
-        self.assertEqual(runtime.get_opencode_session(99999, "opencode", "/tmp/oc-project"), "ses_newer")
-        self.assertEqual(runtime.get_opencode_session(99999, "opencode", "/tmp/oc-project", allow_db=False), "")
 
 
 class StateBackedDetectionTests(TempEnvMixin, unittest.TestCase):

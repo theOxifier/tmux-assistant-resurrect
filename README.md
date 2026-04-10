@@ -217,26 +217,6 @@ If you also want to remove Claude/OpenCode integrations:
 python3 ~/.tmux/plugins/tmux-assistant-resurrect/scripts/assistant_admin.py uninstall-hooks
 ```
 
-## Performance
-
-This fork's biggest measured gain is on the save path. On April 9, 2026, a
-local isolated benchmark compared the current Python runtime against upstream
-commit `6be6d82` using mock Claude processes, 5 timed runs per scenario, and an
-isolated tmux socket:
-
-| Scenario | Upstream avg | Fork avg | Speedup | Reduction |
-|----------|-------------:|---------:|--------:|----------:|
-| 116 panes / 40 assistants | 0.169s | 0.139s | 1.22x | 17.8% |
-| 124 panes / 60 assistants | 0.164s | 0.130s | 1.26x | 20.7% |
-| 124 panes / 100 assistants | 0.154s | 0.132s | 1.17x | 14.3% |
-
-Across those scenarios, the save-hook average improved from `0.162s` to
-`0.134s`, about `17.7%` faster overall.
-
-Restore improvements in this fork are more about correctness than raw wall
-clock time: no blind sleeps, launch retries, pane safety guards, and durable
-launch confirmation.
-
 ## For Developers
 
 The `justfile` is for development, not normal TPM usage.
@@ -252,12 +232,11 @@ just restore
 just clean
 just test
 just test-extended
-just benchmark
 ```
 
 `just test` is the fast unit-test gate. `just test-extended` runs the full
-Docker-backed integration suite. The integration and benchmark scripts run tmux
-on isolated sockets so they do not target a live tmux server.
+Docker-backed integration suite. The integration scripts run tmux on isolated
+sockets so they do not target a live tmux server.
 
 ## Limitations
 

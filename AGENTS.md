@@ -109,7 +109,6 @@ changes after an upgrade, check the relevant source to confirm.
 | **Claude hook spawns intermediate `sh -c`** | `$PPID` in the hook is NOT Claude's PID; hooks walk the process tree via `find_claude_pid()` (max 5 levels) | Run `ps -eo pid=,ppid=,args=` while a hook is executing |
 | **OpenCode plugins run in-process** | `process.pid` in the plugin IS the opencode binary's PID; state file is keyed by this PID | OpenCode source: search for `await import(` in the plugin loader (approx. `packages/opencode/src/plugin/index.ts` -- path may move) |
 | **OpenCode Go binary overwrites process title** | `-s <id>` is often NOT visible in `ps`; the plugin state file is the reliable source for live saves, with explicit `-s` / `--session` args as a secondary path when visible | Run `ps -eo args=` on a running `opencode -s <id>` process |
-| **OpenCode SQLite DB** at `~/.local/share/opencode/opencode.db` | Useful for manual inspection and debugging, but the live save path intentionally does not trust cwd-only DB fallback because it can restore the wrong session | Check DB schema: `sqlite3 ~/.local/share/opencode/opencode.db ".schema session"` |
 | **Codex writes `~/.codex/session-tags.jsonl`** | Primary session ID source for Codex (PID → session mapping) | Run Codex and check `cat ~/.codex/session-tags.jsonl` |
 ## Platform gotchas
 
