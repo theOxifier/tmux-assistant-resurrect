@@ -987,8 +987,13 @@ rm -f "$HOME/.codex/session-tags.jsonl"
 
 # Create a rollout file that matches this pane's cwd
 mkdir -p "$HOME/.codex/sessions/2026/03/24"
+ROLLOUT_TS=$(python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+print((datetime.now(timezone.utc) - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+PY
+)
 cat >"$HOME/.codex/sessions/2026/03/24/rollout-test-codex-rollout.jsonl" <<ROLLOUT
-{"timestamp":"2026-03-24T10:00:00.000Z","type":"session_meta","payload":{"id":"ses_codex_rollout_e2e","timestamp":"2026-03-24T10:00:00.000Z","cwd":"$ROLLOUT_CWD","originator":"codex_cli_rs","cli_version":"0.116.0"}}
+{"timestamp":"$ROLLOUT_TS","type":"session_meta","payload":{"id":"ses_codex_rollout_e2e","timestamp":"$ROLLOUT_TS","cwd":"$ROLLOUT_CWD","originator":"codex_cli_rs","cli_version":"0.116.0"}}
 ROLLOUT
 
 rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
@@ -1027,11 +1032,21 @@ wait_for_child "$dedup2_shell_pid" "codex" 10 >/dev/null || echo "WARN: codex ch
 # Remove session-tags.jsonl, provide two rollout files for same cwd
 rm -f "$HOME/.codex/session-tags.jsonl"
 mkdir -p "$HOME/.codex/sessions/2026/03/24"
+DEDUP_TS_A=$(python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+print((datetime.now(timezone.utc) - timedelta(seconds=12)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+PY
+)
+DEDUP_TS_B=$(python3 - <<'PY'
+from datetime import datetime, timedelta, timezone
+print((datetime.now(timezone.utc) - timedelta(seconds=6)).strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+PY
+)
 cat >"$HOME/.codex/sessions/2026/03/24/rollout-test-dedup-aaa.jsonl" <<ROLLOUT
-{"timestamp":"2026-03-24T10:00:00.000Z","type":"session_meta","payload":{"id":"ses_dedup_aaa","timestamp":"2026-03-24T10:00:00.000Z","cwd":"$DEDUP_CWD","originator":"codex_cli_rs","cli_version":"0.116.0"}}
+{"timestamp":"$DEDUP_TS_A","type":"session_meta","payload":{"id":"ses_dedup_aaa","timestamp":"$DEDUP_TS_A","cwd":"$DEDUP_CWD","originator":"codex_cli_rs","cli_version":"0.116.0"}}
 ROLLOUT
 cat >"$HOME/.codex/sessions/2026/03/24/rollout-test-dedup-bbb.jsonl" <<ROLLOUT
-{"timestamp":"2026-03-24T10:01:00.000Z","type":"session_meta","payload":{"id":"ses_dedup_bbb","timestamp":"2026-03-24T10:01:00.000Z","cwd":"$DEDUP_CWD","originator":"codex_cli_rs","cli_version":"0.116.0"}}
+{"timestamp":"$DEDUP_TS_B","type":"session_meta","payload":{"id":"ses_dedup_bbb","timestamp":"$DEDUP_TS_B","cwd":"$DEDUP_CWD","originator":"codex_cli_rs","cli_version":"0.116.0"}}
 ROLLOUT
 
 rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
@@ -1052,6 +1067,45 @@ rm -f "$HOME/.codex/sessions/2026/03/24/rollout-test-dedup-bbb.jsonl"
 kill_pane_children test-codex-dedup1 true
 kill_pane_children test-codex-dedup2 true
 rm -rf "$DEDUP_CWD"
+
+# --- Test 5c4d: Bare Codex session does not guess from stale cwd history ---
+#
+# A fresh `codex` process with no history must not be rebound to an older
+# rollout file just because the cwd matches.
+
+echo ""
+echo "=== Test 5c4d: bare codex does not guess from stale cwd history ==="
+echo ""
+
+BARE_CWD="/tmp/test-codex-bare"
+mkdir -p "$BARE_CWD"
+
+tmux new-session -d -s test-codex-bare -c "$BARE_CWD"
+tmux send-keys -t test-codex-bare "codex" Enter
+codex_bare_shell_pid=$(tmux display-message -t test-codex-bare -p '#{pane_pid}')
+wait_for_child "$codex_bare_shell_pid" "codex" 10 >/dev/null || echo "WARN: codex child not found for bare test"
+
+rm -f "$HOME/.codex/session-tags.jsonl"
+mkdir -p "$HOME/.codex/sessions/2026/03/24"
+cat >"$HOME/.codex/sessions/2026/03/24/rollout-test-codex-bare-stale.jsonl" <<ROLLOUT
+{"timestamp":"2024-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"ses_codex_stale_should_not_match","timestamp":"2024-01-01T00:00:00.000Z","cwd":"$BARE_CWD","originator":"codex_cli_rs","cli_version":"0.116.0"}}
+ROLLOUT
+
+rm -f "$HOME/.tmux/resurrect/assistant-sessions.json"
+just save 2>&1
+
+bare_codex_sid=$(jq -r '.sessions[] | select(.pane | contains("test-codex-bare")) | .session_id' "$HOME/.tmux/resurrect/assistant-sessions.json" 2>/dev/null)
+if [ -z "$bare_codex_sid" ] || [ "$bare_codex_sid" = "null" ]; then
+	pass "Bare Codex session is skipped without live session evidence"
+else
+	fail "Bare Codex session incorrectly matched stale history ($bare_codex_sid)"
+fi
+
+assert_contains "Bare Codex logs missing session evidence" "$(cat "$HOME/.tmux/resurrect/assistant-save.log")" "detected codex in test-codex-bare:0.0"
+
+rm -f "$HOME/.codex/sessions/2026/03/24/rollout-test-codex-bare-stale.jsonl"
+kill_pane_children test-codex-bare true
+rm -rf "$BARE_CWD"
 
 # --- Test 5c5: Corrupt/empty state file doesn't crash save ---
 #

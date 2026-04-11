@@ -110,6 +110,7 @@ changes after an upgrade, check the relevant source to confirm.
 | **OpenCode plugins run in-process** | `process.pid` in the plugin IS the opencode binary's PID; state file is keyed by this PID | OpenCode source: search for `await import(` in the plugin loader (approx. `packages/opencode/src/plugin/index.ts` -- path may move) |
 | **OpenCode Go binary overwrites process title** | `-s <id>` is often NOT visible in `ps`; the plugin state file is the reliable source for live saves, with explicit `-s` / `--session` args as a secondary path when visible | Run `ps -eo args=` on a running `opencode -s <id>` process |
 | **Codex writes `~/.codex/session-tags.jsonl`** | Primary session ID source for Codex (PID → session mapping) | Run Codex and check `cat ~/.codex/session-tags.jsonl` |
+| **Codex rollout metadata must be close to process start** | Cwd-only rollout history is only trustworthy when its timestamp is near the live Codex process start. Bare `codex` with no history should be skipped, not rebound to an older thread. | Compare rollout `session_meta.timestamp` with `ps -o etimes=` for the live Codex PID |
 ## Platform gotchas
 
 These are hard-won lessons. Do not "simplify" them away.

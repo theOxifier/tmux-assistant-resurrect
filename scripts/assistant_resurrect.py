@@ -30,6 +30,7 @@ RESTORE_TIMEOUT_SECONDS = float(os.environ.get("TMUX_ASSISTANT_RESTORE_TIMEOUT_S
 RESTORE_POLL_INTERVAL_SECONDS = float(os.environ.get("TMUX_ASSISTANT_RESTORE_POLL_INTERVAL_SECONDS", "0.1"))
 RESTORE_RETRY_INTERVAL_SECONDS = float(os.environ.get("TMUX_ASSISTANT_RESTORE_RETRY_INTERVAL_SECONDS", "1.5"))
 RESTORE_CONFIRMATION_SECONDS = float(os.environ.get("TMUX_ASSISTANT_RESTORE_CONFIRMATION_SECONDS", "0.75"))
+CODEX_ROLLOUT_MATCH_WINDOW_SECONDS = float(os.environ.get("TMUX_ASSISTANT_CODEX_ROLLOUT_MATCH_WINDOW_SECONDS", "120.0"))
 
 
 @dataclass
@@ -73,7 +74,6 @@ class CodexMetadata:
     thread_name_to_session: dict[str, str]
     rollout_by_cwd: dict[str, list[RolloutCandidate]]
     sid_to_cwds: dict[str, set[str]]
-    latest_by_cwd: dict[str, tuple[int, str]]
 
 
 def state_dir() -> Path:
@@ -469,7 +469,6 @@ def load_codex_metadata() -> CodexMetadata:
     thread_name_to_session: dict[str, str] = {}
     rollout_by_cwd: dict[str, list[RolloutCandidate]] = defaultdict(list)
     sid_to_cwds: dict[str, set[str]] = defaultdict(set)
-    latest_by_cwd: dict[str, tuple[int, str]] = {}
 
     for row in read_json_lines(codex_home / "session-tags.jsonl"):
         try:
@@ -529,17 +528,12 @@ def load_codex_metadata() -> CodexMetadata:
             if not isinstance(session_id, str) or not isinstance(cwd, str):
                 continue
             sid_to_cwds[session_id].add(cwd)
-            updated_at = normalize_int(row["updated_at"])
-            current = latest_by_cwd.get(cwd)
-            if current is None or updated_at > current[0]:
-                latest_by_cwd[cwd] = (updated_at, session_id)
 
     return CodexMetadata(
         pid_to_session=pid_to_session,
         thread_name_to_session=thread_name_to_session,
         rollout_by_cwd=rollout_by_cwd,
         sid_to_cwds=sid_to_cwds,
-        latest_by_cwd=latest_by_cwd,
     )
 
 
@@ -622,19 +616,25 @@ def _rollout_candidate_for_cwd(
     if not candidates:
         return ""
     etimes = read_etimes(child_pid)
-    process_start = time.time() - etimes if etimes is not None else None
+    if etimes is None:
+        return ""
+    process_start = time.time() - etimes
+    matching_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate.timestamp is not None
+        and abs(process_start - candidate.timestamp) <= CODEX_ROLLOUT_MATCH_WINDOW_SECONDS
+    ]
+    if not matching_candidates:
+        return ""
 
     def score(candidate: RolloutCandidate) -> tuple[int, int, float, float]:
         reused = candidate.session_id in used_ids
-        if process_start is None or candidate.timestamp is None:
-            prior = 0
-            distance = float("inf")
-        else:
-            prior = 1 if candidate.timestamp <= process_start + 120 else 0
-            distance = abs(process_start - candidate.timestamp)
+        prior = 1 if candidate.timestamp <= process_start else 0
+        distance = abs(process_start - candidate.timestamp or 0.0)
         return (0 if reused else 1, prior, -distance, candidate.mtime)
 
-    best = max(candidates, key=score)
+    best = max(matching_candidates, key=score)
     return best.session_id
 
 
@@ -662,17 +662,13 @@ def get_codex_session(
     if named_target:
         candidate = metadata.thread_name_to_session.get(named_target)
         if candidate:
-            if not cwd or cwd in metadata.sid_to_cwds.get(candidate, set()):
+            if candidate not in used_ids and (not cwd or cwd in metadata.sid_to_cwds.get(candidate, set())):
                 return candidate
 
     if cwd:
         rollout_sid = _rollout_candidate_for_cwd(cwd, child_pid, used_ids, metadata)
         if rollout_sid:
             return rollout_sid
-
-        latest = metadata.latest_by_cwd.get(cwd)
-        if latest:
-            return latest[1]
 
     fallback = re.search(r"\bresume\s+([A-Za-z0-9_.:/-]+)", args)
     if fallback:

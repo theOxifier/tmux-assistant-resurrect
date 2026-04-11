@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "assistant_resurrect.py"
@@ -274,13 +275,48 @@ class CodexSessionTests(TempEnvMixin, unittest.TestCase):
             encoding="utf-8",
         )
         metadata = runtime.load_codex_metadata()
-        first = runtime.get_codex_session(99999, "codex", "/tmp/test-project", metadata=metadata, used_ids=set())
-        second = runtime.get_codex_session(99999, "codex", "/tmp/test-project", metadata=metadata, used_ids={first})
+        now = runtime.parse_timestamp("2026-03-24T10:01:15.000Z")
+        self.assertIsNotNone(now)
+        with (
+            mock.patch.object(runtime, "read_etimes", return_value=15),
+            mock.patch.object(runtime.time, "time", return_value=now),
+        ):
+            first = runtime.get_codex_session(99999, "codex", "/tmp/test-project", metadata=metadata, used_ids=set())
+            second = runtime.get_codex_session(99999, "codex", "/tmp/test-project", metadata=metadata, used_ids={first})
         self.assertIn(first, {"ses_rollout_aaa", "ses_rollout_bbb"})
         self.assertIn(second, {"ses_rollout_aaa", "ses_rollout_bbb"})
         self.assertNotEqual(first, second)
 
-    def test_sqlite_fallback_and_window_name(self) -> None:
+    def test_rollout_lookup_rejects_stale_history_for_bare_session(self) -> None:
+        sessions_dir = self.home / ".codex" / "sessions" / "2026" / "03" / "24"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / "stale-rollout.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "ses_stale_rollout",
+                        "cwd": "/tmp/test-project",
+                        "timestamp": "2026-03-24T10:00:00.000Z",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        metadata = runtime.load_codex_metadata()
+        now = runtime.parse_timestamp("2026-04-10T10:01:15.000Z")
+        self.assertIsNotNone(now)
+        with (
+            mock.patch.object(runtime, "read_etimes", return_value=15),
+            mock.patch.object(runtime.time, "time", return_value=now),
+        ):
+            self.assertEqual(
+                runtime.get_codex_session(99999, "codex", "/tmp/test-project", metadata=metadata, used_ids=set()),
+                "",
+            )
+
+    def test_named_thread_lookup_uses_window_name_and_cwd(self) -> None:
         codex_dir = self.home / ".codex"
         codex_dir.mkdir(parents=True, exist_ok=True)
         db_path = codex_dir / "state_5.sqlite"
@@ -349,8 +385,122 @@ class CodexSessionTests(TempEnvMixin, unittest.TestCase):
         )
         self.assertEqual(
             runtime.get_codex_session(99999, "codex", "/tmp/codex-project", "bad-window", metadata=metadata),
-            "019renamewinner00000000000000000000",
+            "",
         )
+
+    def test_named_thread_lookup_does_not_reuse_same_session_across_panes(self) -> None:
+        codex_dir = self.home / ".codex"
+        codex_dir.mkdir(parents=True, exist_ok=True)
+        db_path = codex_dir / "state_5.sqlite"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                model_provider TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                title TEXT NOT NULL,
+                sandbox_policy TEXT NOT NULL,
+                approval_mode TEXT NOT NULL,
+                tokens_used INTEGER NOT NULL DEFAULT 0,
+                has_user_event INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0,
+                archived_at INTEGER
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO threads (
+                id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+                sandbox_policy, approval_mode, archived
+            ) VALUES (
+                '019namedpane1000000000000000000000',
+                '/tmp/rollout-named.jsonl',
+                1000, 3000, 'interactive', 'openai', '/tmp/codex-project', 'shared-window',
+                'workspace-write', 'on-request', 0
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO threads (
+                id, rollout_path, created_at, updated_at, source, model_provider, cwd, title,
+                sandbox_policy, approval_mode, archived
+            ) VALUES (
+                '019rolloutpane200000000000000000000',
+                '/tmp/rollout-pane-2.jsonl',
+                1000, 2000, 'interactive', 'openai', '/tmp/codex-project', 'another title',
+                'workspace-write', 'on-request', 0
+            )"""
+        )
+        conn.commit()
+        conn.close()
+        (codex_dir / "session_index.jsonl").write_text(
+            json.dumps(
+                {
+                    "id": "019namedpane1000000000000000000000",
+                    "thread_name": "shared-window",
+                    "updated_at": "2026-01-01T00:00:03Z",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        sessions_dir = codex_dir / "sessions" / "2026" / "03" / "24"
+        sessions_dir.mkdir(parents=True, exist_ok=True)
+        (sessions_dir / "rollout-pane-1.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "019namedpane1000000000000000000000",
+                        "cwd": "/tmp/codex-project",
+                        "timestamp": "2026-03-24T10:00:00.000Z",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (sessions_dir / "rollout-pane-2.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "019rolloutpane200000000000000000000",
+                        "cwd": "/tmp/codex-project",
+                        "timestamp": "2026-03-24T10:00:10.000Z",
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        metadata = runtime.load_codex_metadata()
+        now = runtime.parse_timestamp("2026-03-24T10:00:15.000Z")
+        self.assertIsNotNone(now)
+        with (
+            mock.patch.object(runtime, "read_etimes", return_value=15),
+            mock.patch.object(runtime.time, "time", return_value=now),
+        ):
+            first = runtime.get_codex_session(
+                99999,
+                "codex",
+                "/tmp/codex-project",
+                "shared-window",
+                metadata=metadata,
+                used_ids=set(),
+            )
+            second = runtime.get_codex_session(
+                99998,
+                "codex",
+                "/tmp/codex-project",
+                "shared-window",
+                metadata=metadata,
+                used_ids={first},
+            )
+        self.assertEqual(first, "019namedpane1000000000000000000000")
+        self.assertEqual(second, "019rolloutpane200000000000000000000")
 
 
 class ConfigSafetyTests(TempEnvMixin, unittest.TestCase):

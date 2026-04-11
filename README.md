@@ -182,7 +182,7 @@ Session ID sources:
 |------|----------------|-----------|
 | Claude | SessionStart hook state file | `--resume` in process args |
 | OpenCode | Plugin state file | `-s` / `--session` args |
-| Codex | `~/.codex/session-tags.jsonl` | explicit UUID, thread metadata, rollout metadata, SQLite, `resume` args |
+| Codex | `~/.codex/session-tags.jsonl` | explicit UUID, named-thread metadata, time-correlated rollout metadata, `resume` args |
 
 For deeper implementation details, see
 [docs/design-principles.md](docs/design-principles.md).
@@ -197,6 +197,7 @@ For deeper implementation details, see
 | Claude or OpenCode was never tracked | Run `python3 ~/.tmux/plugins/tmux-assistant-resurrect/scripts/assistant_admin.py install-hooks` once |
 | Restore says session not found | The assistant session itself may have expired; start a new one and save again |
 | OpenCode session missing after save | Make sure the OpenCode plugin is installed; the live save path will not guess from cwd alone |
+| Bare Codex session restored an old thread | Upgrade to a build that only trusts PID, named-thread, explicit `resume`, or rollout metadata close to the live process start |
 | Assistants launch twice | Make sure assistants are not listed in `@resurrect-processes` |
 | `prefix + U` exits an assistant | Make sure `@assistant-resurrect-safe-tpm-update` is not set to `off`, then reload tmux |
 

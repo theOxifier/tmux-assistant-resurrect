@@ -53,8 +53,11 @@ before hooks/plugins have fired):
   The live save path intentionally does not trust cwd-based DB lookups, because
   accuracy matters more than recovering an ambiguous session.
 - **Codex CLI**: PID lookup in `~/.codex/session-tags.jsonl` (primary when
-  available); explicit UUID / named-thread / rollout / SQLite evidence
-  (ordered fallback chain); `resume <id>` in process args (last resort)
+  available); explicit UUID / named-thread evidence (with SQLite used only to
+  validate cwd for named threads); rollout metadata only when its timestamp is
+  close to the live process start; `resume <id>` in process args (last resort).
+  Bare `codex` sessions without live session evidence are intentionally skipped
+  instead of guessed from old cwd history.
 
 ## Adding a new assistant
 
